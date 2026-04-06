@@ -1,0 +1,19 @@
+# Go build artifacts
+/yak-go
+*.exe
+*.test
+*.out
+
+# Go cache
+.gocache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
