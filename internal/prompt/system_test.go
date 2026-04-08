@@ -24,7 +24,7 @@ func TestBuildSystemPromptIncludesToolSections(t *testing.T) {
 		tools.NewGrepTool(),
 		tools.NewLsTool(tools.OSFS{}),
 		tools.NewFindTool(),
-	}, env)
+	}, nil, env, nil)
 
 	for _, fragment := range []string{
 		"# Environment",
@@ -49,5 +49,22 @@ func TestBuildSystemPromptIncludesToolSections(t *testing.T) {
 		if !strings.Contains(got, fragment) {
 			t.Fatalf("expected prompt to contain %q", fragment)
 		}
+	}
+}
+
+func TestBuildSystemPromptIncludesPluginSections(t *testing.T) {
+	env := Environment{OS: "linux", Arch: "amd64"}
+
+	got := BuildSystemPrompt(nil, nil, env, []string{
+		"# My Plugin\nDo something special.",
+		"",
+		"# Another Plugin\nMore instructions.",
+	})
+
+	if !strings.Contains(got, "# My Plugin\nDo something special.") {
+		t.Fatal("expected prompt to contain first plugin section")
+	}
+	if !strings.Contains(got, "# Another Plugin\nMore instructions.") {
+		t.Fatal("expected prompt to contain second plugin section")
 	}
 }

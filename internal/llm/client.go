@@ -20,11 +20,13 @@ type ChatClient interface {
 type Client struct {
 	baseURL    string
 	model      string
+	apiKey     string
 	httpClient *http.Client
 }
 
 type Options struct {
 	Timeout time.Duration
+	APIKey  string
 }
 
 type ClientError struct {
@@ -45,10 +47,18 @@ func NewClient(baseURL, model string, opts *Options) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		model:   model,
+		apiKey:  strings.TrimSpace(optsAPIKey(opts)),
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
 	}
+}
+
+func optsAPIKey(opts *Options) string {
+	if opts == nil {
+		return ""
+	}
+	return opts.APIKey
 }
 
 func (c *Client) Chat(ctx context.Context, messages []types.Message, tools []types.ChatRequestTool) (*types.ChatResponse, error) {
@@ -68,6 +78,9 @@ func (c *Client) Chat(ctx context.Context, messages []types.Message, tools []typ
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

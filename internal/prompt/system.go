@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"yak-go/internal/skills"
 	"yak-go/internal/tools"
 )
 
@@ -15,7 +16,7 @@ type Environment struct {
 	Time      string
 }
 
-func BuildSystemPrompt(available []tools.Tool, env Environment) string {
+func BuildSystemPrompt(available []tools.Tool, loadedSkills []skills.Skill, env Environment, pluginSections []string) string {
 	sections := []string{
 		"You are a coding assistant. You help the user by reading, writing, editing files, and executing commands when needed.",
 	}
@@ -27,7 +28,46 @@ func BuildSystemPrompt(available []tools.Tool, env Environment) string {
 		sections = append(sections, buildToolSelectionRules(available))
 	}
 
+	if s := buildSkillsSection(loadedSkills); s != "" {
+		sections = append(sections, s)
+	}
+
+	for _, s := range pluginSections {
+		if s != "" {
+			sections = append(sections, s)
+		}
+	}
+
 	return strings.Join(sections, "\n\n")
+}
+
+func buildSkillsSection(loadedSkills []skills.Skill) string {
+	var visible []skills.Skill
+	for _, s := range loadedSkills {
+		if !s.DisableModelInvocation {
+			visible = append(visible, s)
+		}
+	}
+	if len(visible) == 0 {
+		return ""
+	}
+
+	lines := []string{
+		"The following skills provide specialized instructions for specific tasks.",
+		"Use the read tool to load a skill's file when the task matches its description.",
+		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
+		"",
+		"<available_skills>",
+	}
+	for _, s := range visible {
+		lines = append(lines, "  <skill>")
+		lines = append(lines, fmt.Sprintf("    <name>%s</name>", s.Name))
+		lines = append(lines, fmt.Sprintf("    <description>%s</description>", s.Description))
+		lines = append(lines, fmt.Sprintf("    <location>%s</location>", s.FilePath))
+		lines = append(lines, "  </skill>")
+	}
+	lines = append(lines, "</available_skills>")
+	return strings.Join(lines, "\n")
 }
 
 func buildEnvironment(env Environment) string {

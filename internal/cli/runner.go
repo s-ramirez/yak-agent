@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"yak-go/internal/llm"
+	"yak-go/internal/plugin"
 	"yak-go/internal/prompt"
+	"yak-go/internal/skills"
 	"yak-go/internal/tools"
 	"yak-go/internal/types"
 )
@@ -22,9 +24,12 @@ type IO interface {
 }
 
 type Runner struct {
-	Client   llm.ChatClient
-	IO       IO
-	Registry *tools.Registry
+	Client         llm.ChatClient
+	IO             IO
+	Registry       *tools.Registry
+	Skills         []skills.Skill
+	AfterTurnHooks []plugin.AfterTurnHook
+	PluginPrompts  []string
 }
 
 func (r Runner) Run(ctx context.Context) error {
@@ -56,7 +61,7 @@ func (r Runner) Run(ctx context.Context) error {
 
 	messages := []types.Message{{
 		Role:    "system",
-		Content: prompt.BuildSystemPrompt(availableTools, env),
+		Content: prompt.BuildSystemPrompt(availableTools, r.Skills, env, r.PluginPrompts),
 	}}
 
 	for {
@@ -77,9 +82,17 @@ func (r Runner) Run(ctx context.Context) error {
 			continue
 		}
 
+		expanded, err := r.expandSkillCommand(trimmed)
+		if err != nil {
+			if writeErr := r.IO.Write(fmt.Sprintf("error: %v\n", err)); writeErr != nil {
+				return writeErr
+			}
+			continue
+		}
+
 		messages = append(messages, types.Message{
 			Role:    "user",
-			Content: trimmed,
+			Content: expanded,
 		})
 
 		if err := r.agentLoop(ctx, &messages, toolSchemas); err != nil {
@@ -131,6 +144,24 @@ func (r Runner) agentLoop(ctx context.Context, messages *[]types.Message, toolSc
 				Role:    "assistant",
 				Content: text,
 			})
+
+			// Check after-turn hooks — plugins can inject a follow-up message.
+			injected := false
+			for _, h := range r.AfterTurnHooks {
+				if msg := h.AfterTurn(text); msg != "" {
+					*messages = append(*messages, types.Message{
+						Role:    "user",
+						Content: msg,
+					})
+					hadToolCalls = false
+					emptyRetries = 0
+					injected = true
+					break
+				}
+			}
+			if injected {
+				continue
+			}
 			return nil
 		}
 
@@ -208,4 +239,39 @@ func nullableContent(content *string) any {
 		return nil
 	}
 	return *content
+}
+
+const skillPrefix = "/skill:"
+
+// expandSkillCommand checks if input starts with /skill:<name> and expands it
+// to the skill's file content plus any trailing arguments. If the input is not
+// a skill command, it is returned unchanged.
+func (r Runner) expandSkillCommand(input string) (string, error) {
+	if !strings.HasPrefix(input, skillPrefix) {
+		return input, nil
+	}
+
+	rest := input[len(skillPrefix):]
+	name := rest
+	args := ""
+	if idx := strings.IndexByte(rest, ' '); idx >= 0 {
+		name = rest[:idx]
+		args = strings.TrimSpace(rest[idx+1:])
+	}
+
+	for _, s := range r.Skills {
+		if s.Name == name {
+			content, err := os.ReadFile(s.FilePath)
+			if err != nil {
+				return "", fmt.Errorf("reading skill %q: %w", name, err)
+			}
+			result := string(content)
+			if args != "" {
+				result += "\n\n" + args
+			}
+			return result, nil
+		}
+	}
+
+	return "", fmt.Errorf("unknown skill %q", name)
 }

@@ -7,11 +7,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"yak-go/internal/cli"
 	"yak-go/internal/llm"
+	"yak-go/internal/plugin"
+	"yak-go/internal/plugin/tilldone"
+	"yak-go/internal/skills"
 	"yak-go/internal/tools"
 )
 
@@ -49,11 +53,42 @@ func main() {
 		model = "default"
 	}
 
+	apiKey := os.Getenv("YAK_API_KEY")
+
 	client := llm.NewClient(baseURL, model, &llm.Options{
 		Timeout: 60 * time.Second,
+		APIKey:  apiKey,
 	})
 
-	registry := tools.NewRegistry(
+	var chatClient llm.ChatClient = client
+	logDir := os.Getenv("YAK_LOG_DIR")
+	if logDir != "" {
+		sessionDir := filepath.Join(logDir, time.Now().Format("20060102-150405"))
+		lc, err := llm.NewLoggingClient(client, sessionDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to set up logging: %v\n", err)
+		} else {
+			chatClient = lc
+			fmt.Fprintf(os.Stderr, "Logging to %s\n", sessionDir)
+		}
+	}
+
+	// Initialize plugins.
+	plugins := []plugin.Plugin{
+		tilldone.New(),
+	}
+
+	api := plugin.API{
+		Log: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "[plugin] "+format+"\n", args...)
+		},
+	}
+	for _, p := range plugins {
+		p.Init(api)
+	}
+
+	// Collect built-in + plugin tools.
+	builtinTools := []tools.Tool{
 		tools.NewReadTool(tools.OSFS{}),
 		tools.NewWriteTool(tools.OSFS{}),
 		tools.NewEditTool(tools.OSFS{}),
@@ -61,14 +96,52 @@ func main() {
 		tools.NewGrepTool(),
 		tools.NewLsTool(tools.OSFS{}),
 		tools.NewFindTool(),
-	)
+	}
+	for _, p := range plugins {
+		builtinTools = append(builtinTools, p.Tools()...)
+	}
 
+	registry := tools.NewRegistry(builtinTools...)
 	registry.AddHook(&logHook{writer: os.Stderr})
+	for _, p := range plugins {
+		for _, h := range p.Hooks() {
+			registry.AddHook(h)
+		}
+	}
+
+	// Collect after-turn hooks and prompt sections from plugins.
+	var afterTurnHooks []plugin.AfterTurnHook
+	var pluginPrompts []string
+	for _, p := range plugins {
+		if ath, ok := p.(plugin.AfterTurnHook); ok {
+			afterTurnHooks = append(afterTurnHooks, ath)
+		}
+		if s := p.SystemPromptSection(); s != "" {
+			pluginPrompts = append(pluginPrompts, s)
+		}
+	}
+
+	cwd, _ := os.Getwd()
+	home, _ := os.UserHomeDir()
+	skillDirs := []string{
+		filepath.Join(home, ".yak", "skills"),
+		filepath.Join(cwd, ".yak", "skills"),
+	}
+	loadedSkills, diags, err := skills.LoadSkills(skillDirs...)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: loading skills: %v\n", err)
+	}
+	for _, d := range diags {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", d)
+	}
 
 	runner := cli.Runner{
-		Client:   client,
-		IO:       &stdio{reader: bufio.NewReader(os.Stdin), writer: os.Stdout},
-		Registry: registry,
+		Client:         chatClient,
+		IO:             &stdio{reader: bufio.NewReader(os.Stdin), writer: os.Stdout},
+		Registry:       registry,
+		Skills:         loadedSkills,
+		AfterTurnHooks: afterTurnHooks,
+		PluginPrompts:  pluginPrompts,
 	}
 
 	if err := runner.Run(context.Background()); err != nil && err != io.EOF {

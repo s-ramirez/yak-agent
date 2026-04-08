@@ -15,11 +15,13 @@ import (
 func TestClientChatSendsExpectedRequest(t *testing.T) {
 	var gotMethod string
 	var gotPath string
+	var gotAuth string
 	var gotRequest types.ChatRequest
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
 
 		defer r.Body.Close()
 		if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
@@ -56,6 +58,9 @@ func TestClientChatSendsExpectedRequest(t *testing.T) {
 	if gotPath != "/v1/chat/completions" {
 		t.Fatalf("unexpected path: %s", gotPath)
 	}
+	if gotAuth != "" {
+		t.Fatalf("unexpected authorization header: %q", gotAuth)
+	}
 	if gotRequest.Model != "test-model" {
 		t.Fatalf("unexpected model: %s", gotRequest.Model)
 	}
@@ -67,6 +72,29 @@ func TestClientChatSendsExpectedRequest(t *testing.T) {
 	}
 	if types.GetResponseText(resp) != "ok" {
 		t.Fatalf("unexpected response text: %q", types.GetResponseText(resp))
+	}
+}
+
+func TestClientChatSendsBearerTokenWhenAPIKeyConfigured(t *testing.T) {
+	var gotAuth string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-model", &Options{APIKey: "secret-key"})
+	_, err := client.Chat(context.Background(), []types.Message{
+		{Role: "user", Content: "hello"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+
+	if gotAuth != "Bearer secret-key" {
+		t.Fatalf("unexpected authorization header: %q", gotAuth)
 	}
 }
 

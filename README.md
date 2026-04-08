@@ -4,6 +4,7 @@
 
 - Interactive CLI loop with an agentic tool-use cycle
 - LM Studio-compatible `/v1/chat/completions` client
+- Optional bearer-token auth for OpenAI-compatible endpoints
 - Dynamic system prompt with environment info and tool-selection rules
 - Built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `ls`, `find`
 
@@ -21,15 +22,25 @@ go run ./cmd/yak
 By default the CLI connects to a local LM Studio instance. Configure with
 environment variables:
 
-| Variable       | Default                  | Description                           |
-|----------------|--------------------------|---------------------------------------|
-| `YAK_BASE_URL` | `http://localhost:1234`  | Base URL of the chat completions API  |
-| `YAK_MODEL`    | `default`                | Model name to use in API requests     |
+| Variable        | Default                 | Description                                 |
+|-----------------|-------------------------|---------------------------------------------|
+| `YAK_BASE_URL`  | `http://localhost:1234` | Base URL of the chat completions API        |
+| `YAK_MODEL`     | `default`               | Model name to use in API requests           |
+| `YAK_API_KEY`   | unset                   | Optional bearer token for authenticated APIs |
 
 Example with a custom endpoint:
 
 ```sh
 YAK_BASE_URL=http://localhost:8080 YAK_MODEL=my-model go run ./cmd/yak
+```
+
+Example with OpenAI:
+
+```sh
+YAK_BASE_URL=https://api.openai.com \
+YAK_MODEL=gpt-4o-mini \
+YAK_API_KEY=your-openai-api-key \
+go run ./cmd/yak
 ```
 
 ## Testing
