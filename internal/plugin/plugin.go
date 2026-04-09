@@ -10,6 +10,12 @@ type API struct {
 	Log func(format string, args ...any)
 }
 
+// AgentLifecycleContext identifies the agent run invoking a lifecycle hook.
+type AgentLifecycleContext struct {
+	AgentID   string
+	AgentName string
+}
+
 // Plugin is the interface all plugins implement.
 type Plugin interface {
 	// Name returns a unique identifier for the plugin.
@@ -36,4 +42,16 @@ type AfterTurnHook interface {
 	// Return a non-empty string to inject it as a user message and
 	// continue the agent loop. Return "" to end the turn normally.
 	AfterTurn(assistantText string) string
+}
+
+// AgentStartHook is an optional interface plugins can implement.
+// It is called when an agent run starts processing a request.
+type AgentStartHook interface {
+	OnAgentStart(ctx AgentLifecycleContext)
+}
+
+// AgentEndHook is an optional interface plugins can implement.
+// It is called when an agent run finishes processing a request.
+type AgentEndHook interface {
+	OnAgentEnd(ctx AgentLifecycleContext, finalText string, err error)
 }

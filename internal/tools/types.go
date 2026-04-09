@@ -38,16 +38,22 @@ func errorResultf(format string, args ...any) ToolResult {
 	return errorResult(fmt.Sprintf(format, args...))
 }
 
+// HookContext carries identity information about the agent invoking a tool.
+type HookContext struct {
+	AgentID   string // "main" or "subagent-1", etc.
+	AgentName string // human-readable name, e.g. "orchestrator" or "researcher"
+}
+
 // ToolHook receives notifications before and after tool execution.
 // Both methods are optional — return nil from either to take no action.
 type ToolHook interface {
 	// BeforeToolCall is invoked before a tool executes.
 	// Return a non-empty string to block execution (the string is used as the error message).
 	// Return "" to allow execution to proceed.
-	BeforeToolCall(name string, params json.RawMessage) string
+	BeforeToolCall(hctx HookContext, name string, params json.RawMessage) string
 
 	// AfterToolCall is invoked after a tool finishes executing.
-	AfterToolCall(name string, result ToolResult, err error)
+	AfterToolCall(hctx HookContext, name string, params json.RawMessage, result ToolResult, err error)
 }
 
 type Registry struct {
@@ -75,9 +81,9 @@ func (r *Registry) AddHook(hook ToolHook) {
 
 // RunBeforeHooks calls BeforeToolCall on all registered hooks.
 // Returns a non-empty block reason if any hook blocks execution.
-func (r *Registry) RunBeforeHooks(name string, params json.RawMessage) string {
+func (r *Registry) RunBeforeHooks(hctx HookContext, name string, params json.RawMessage) string {
 	for _, hook := range r.hooks {
-		if reason := hook.BeforeToolCall(name, params); reason != "" {
+		if reason := hook.BeforeToolCall(hctx, name, params); reason != "" {
 			return reason
 		}
 	}
@@ -85,9 +91,9 @@ func (r *Registry) RunBeforeHooks(name string, params json.RawMessage) string {
 }
 
 // RunAfterHooks calls AfterToolCall on all registered hooks.
-func (r *Registry) RunAfterHooks(name string, result ToolResult, err error) {
+func (r *Registry) RunAfterHooks(hctx HookContext, name string, params json.RawMessage, result ToolResult, err error) {
 	for _, hook := range r.hooks {
-		hook.AfterToolCall(name, result, err)
+		hook.AfterToolCall(hctx, name, params, result, err)
 	}
 }
 

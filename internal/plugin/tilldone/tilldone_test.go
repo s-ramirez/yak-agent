@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"yak-go/internal/plugin"
+	"yak-go/internal/tools"
 )
 
 func setup() *TillDone {
@@ -251,7 +252,7 @@ func TestNewListResetsState(t *testing.T) {
 func TestGateAllowsTilldone(t *testing.T) {
 	td := setup()
 	gate := td.Hooks()[0]
-	if reason := gate.BeforeToolCall("tilldone", nil); reason != "" {
+	if reason := gate.BeforeToolCall(tools.HookContext{}, "tilldone", nil); reason != "" {
 		t.Fatalf("expected tilldone to be allowed, got: %s", reason)
 	}
 }
@@ -259,7 +260,7 @@ func TestGateAllowsTilldone(t *testing.T) {
 func TestGateBlocksWhenNoTasks(t *testing.T) {
 	td := setup()
 	gate := td.Hooks()[0]
-	reason := gate.BeforeToolCall("bash", nil)
+	reason := gate.BeforeToolCall(tools.HookContext{}, "bash", nil)
 	if reason == "" {
 		t.Fatal("expected gate to block when no tasks")
 	}
@@ -272,7 +273,7 @@ func TestGateBlocksWhenAllDone(t *testing.T) {
 	exec(t, td, map[string]any{"action": "toggle", "id": 1}) // inprogress -> done
 
 	gate := td.Hooks()[0]
-	reason := gate.BeforeToolCall("bash", nil)
+	reason := gate.BeforeToolCall(tools.HookContext{}, "bash", nil)
 	if reason == "" {
 		t.Fatal("expected gate to block when all done")
 	}
@@ -283,7 +284,7 @@ func TestGateBlocksWhenNoneInProgress(t *testing.T) {
 	exec(t, td, map[string]any{"action": "add", "text": "Task"})
 
 	gate := td.Hooks()[0]
-	reason := gate.BeforeToolCall("bash", nil)
+	reason := gate.BeforeToolCall(tools.HookContext{}, "bash", nil)
 	if reason == "" {
 		t.Fatal("expected gate to block when none in progress")
 	}
@@ -295,7 +296,7 @@ func TestGateAllowsWhenInProgress(t *testing.T) {
 	exec(t, td, map[string]any{"action": "toggle", "id": 1})
 
 	gate := td.Hooks()[0]
-	reason := gate.BeforeToolCall("bash", nil)
+	reason := gate.BeforeToolCall(tools.HookContext{}, "bash", nil)
 	if reason != "" {
 		t.Fatalf("expected gate to allow, got: %s", reason)
 	}
@@ -359,7 +360,7 @@ func TestAfterTurnResetsOnToolCall(t *testing.T) {
 
 	// Gate call resets nudge flag
 	gate := td.Hooks()[0]
-	gate.BeforeToolCall("bash", nil)
+	gate.BeforeToolCall(tools.HookContext{}, "bash", nil)
 
 	// Should nudge again
 	msg := td.AfterTurn("response 2")

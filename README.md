@@ -7,6 +7,7 @@
 - Optional bearer-token auth for OpenAI-compatible endpoints
 - Dynamic system prompt with environment info and tool-selection rules
 - Built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `ls`, `find`
+- Plugin system with startup-registered plugins; `tilldone` is currently disabled
 
 ## Prerequisites
 
@@ -20,13 +21,23 @@ go run ./cmd/yak
 ```
 
 By default the CLI connects to a local LM Studio instance. Configure with
-environment variables:
+environment variables. The CLI also loads a local `.env` file automatically,
+which is useful for development defaults:
+
+```env
+YAK_WEBUI_PORT=8420
+YAK_LOG_DIR=.yak/logs
+```
+
+Available settings:
 
 | Variable        | Default                 | Description                                 |
 |-----------------|-------------------------|---------------------------------------------|
 | `YAK_BASE_URL`  | `http://localhost:1234` | Base URL of the chat completions API        |
 | `YAK_MODEL`     | `default`               | Model name to use in API requests           |
 | `YAK_API_KEY`   | unset                   | Optional bearer token for authenticated APIs |
+| `YAK_WEBUI_PORT`| `8420`                  | Enables the web UI plugin on the given port |
+| `YAK_LOG_DIR`   | unset                   | Writes session logs under a timestamped subdirectory |
 
 Example with a custom endpoint:
 

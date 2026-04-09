@@ -14,28 +14,8 @@ import (
 const grepDefaultLimit = 100
 const grepMaxLineLength = 500
 
-type GrepTool struct{}
-
-var grepDefinition = ToolDefinition{
-	Name:        "grep",
-	Description: "Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore when possible. Output is limited to 100 matches by default.",
-	Guidelines: []string{
-		"Use grep to search for patterns across files in the project.",
-		"Use the glob parameter to narrow the search to specific file types.",
-		"Use ignoreCase for case-insensitive searches.",
-	},
-	Parameters: JSONSchema{
-		"type": "object",
-		"properties": map[string]any{
-			"pattern":    map[string]any{"type": "string", "description": "Search pattern (regex or literal string)"},
-			"path":       map[string]any{"type": "string", "description": "Directory or file to search (default: current directory)"},
-			"glob":       map[string]any{"type": "string", "description": "Filter files by extension, e.g. '*.go' or '*.ts'"},
-			"ignoreCase": map[string]any{"type": "boolean", "description": "Case-insensitive search (default: false)"},
-			"literal":    map[string]any{"type": "boolean", "description": "Treat pattern as a literal string instead of regex (default: false)"},
-			"limit":      map[string]any{"type": "number", "description": "Maximum number of matches to return (default: 100)"},
-		},
-		"required": []string{"pattern"},
-	},
+type GrepTool struct {
+	definition ToolDefinition
 }
 
 type GrepParams struct {
@@ -47,12 +27,37 @@ type GrepParams struct {
 	Limit      int    `json:"limit"`
 }
 
-func NewGrepTool() *GrepTool {
-	return &GrepTool{}
+func NewGrepTool(extraGuidelines ...string) *GrepTool {
+	guidelines := []string{
+		"Use grep to search for patterns across files in the project.",
+		"Use the glob parameter to narrow the search to specific file types.",
+		"Use ignoreCase for case-insensitive searches.",
+	}
+	guidelines = append(guidelines, extraGuidelines...)
+
+	return &GrepTool{
+		definition: ToolDefinition{
+			Name:        "grep",
+			Description: "Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore when possible. Output is limited to 100 matches by default.",
+			Guidelines:  guidelines,
+			Parameters: JSONSchema{
+				"type": "object",
+				"properties": map[string]any{
+					"pattern":    map[string]any{"type": "string", "description": "Search pattern (regex or literal string)"},
+					"path":       map[string]any{"type": "string", "description": "Directory or file to search (default: current directory)"},
+					"glob":       map[string]any{"type": "string", "description": "Filter files by extension, e.g. '*.go' or '*.ts'"},
+					"ignoreCase": map[string]any{"type": "boolean", "description": "Case-insensitive search (default: false)"},
+					"literal":    map[string]any{"type": "boolean", "description": "Treat pattern as a literal string instead of regex (default: false)"},
+					"limit":      map[string]any{"type": "number", "description": "Maximum number of matches to return (default: 100)"},
+				},
+				"required": []string{"pattern"},
+			},
+		},
+	}
 }
 
 func (t *GrepTool) Definition() ToolDefinition {
-	return grepDefinition
+	return t.definition
 }
 
 func (t *GrepTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult, error) {

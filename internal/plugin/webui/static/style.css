@@ -1,0 +1,102 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    font-family: 'Courier New', monospace;
+    overflow: hidden;
+    height: 100vh;
+}
+
+#app {
+    display: flex;
+    height: 100vh;
+}
+
+#room {
+    flex: 1;
+    background: #16213e;
+    image-rendering: pixelated;
+}
+
+#sidebar {
+    width: 280px;
+    background: #0f3460;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border-left: 2px solid #533483;
+}
+
+#status {
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: bold;
+    text-align: center;
+}
+
+#status.connected {
+    background: #1b4332;
+    color: #95d5b2;
+}
+
+#status.disconnected {
+    background: #641220;
+    color: #f5a5a5;
+}
+
+#sidebar h3 {
+    font-size: 13px;
+    color: #a5b4fc;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+#log {
+    flex: 1;
+    overflow-y: auto;
+    font-size: 11px;
+    line-height: 1.6;
+}
+
+#log::-webkit-scrollbar {
+    width: 4px;
+}
+
+#log::-webkit-scrollbar-thumb {
+    background: #533483;
+    border-radius: 2px;
+}
+
+.log-entry {
+    padding: 2px 4px;
+    border-bottom: 1px solid rgba(83, 52, 131, 0.3);
+}
+
+.log-entry .time {
+    color: #6c757d;
+}
+
+.log-entry .agent {
+    color: #a5b4fc;
+    font-weight: bold;
+}
+
+.log-entry .tool {
+    color: #ffd166;
+}
+
+.log-entry.error .tool {
+    color: #ef476f;
+}
+
+.log-entry.spawn {
+    color: #06d6a0;
+    font-style: italic;
+}

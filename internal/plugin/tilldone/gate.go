@@ -11,7 +11,7 @@ type tilldoneGate struct {
 	state *TillDone
 }
 
-func (g *tilldoneGate) BeforeToolCall(name string, _ json.RawMessage) string {
+func (g *tilldoneGate) BeforeToolCall(_ tools.HookContext, name string, _ json.RawMessage) string {
 	if name == "tilldone" {
 		return ""
 	}
@@ -48,4 +48,4 @@ func (g *tilldoneGate) BeforeToolCall(name string, _ json.RawMessage) string {
 	return ""
 }
 
-func (g *tilldoneGate) AfterToolCall(_ string, _ tools.ToolResult, _ error) {}
+func (g *tilldoneGate) AfterToolCall(_ tools.HookContext, _ string, _ json.RawMessage, _ tools.ToolResult, _ error) {}

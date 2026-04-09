@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,11 +12,16 @@ import (
 	"strings"
 	"time"
 
+	"strconv"
+
+	"github.com/joho/godotenv"
+
 	"yak-go/internal/cli"
 	"yak-go/internal/llm"
 	"yak-go/internal/plugin"
-	"yak-go/internal/plugin/tilldone"
+	"yak-go/internal/plugin/webui"
 	"yak-go/internal/skills"
+	"yak-go/internal/subagents"
 	"yak-go/internal/tools"
 )
 
@@ -43,6 +49,10 @@ func (s *stdio) ReadLine(ctx context.Context) (string, error) {
 }
 
 func main() {
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "warning: loading .env: %v\n", err)
+	}
+
 	baseURL := os.Getenv("YAK_BASE_URL")
 	if baseURL == "" {
 		baseURL = "http://localhost:1234"
@@ -61,9 +71,10 @@ func main() {
 	})
 
 	var chatClient llm.ChatClient = client
+	var sessionDir string
 	logDir := os.Getenv("YAK_LOG_DIR")
 	if logDir != "" {
-		sessionDir := filepath.Join(logDir, time.Now().Format("20060102-150405"))
+		sessionDir = filepath.Join(logDir, time.Now().Format("20060102-150405"))
 		lc, err := llm.NewLoggingClient(client, sessionDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to set up logging: %v\n", err)
@@ -74,8 +85,13 @@ func main() {
 	}
 
 	// Initialize plugins.
-	plugins := []plugin.Plugin{
-		tilldone.New(),
+	var plugins []plugin.Plugin
+	if portStr := os.Getenv("YAK_WEBUI_PORT"); portStr != "" {
+		port, _ := strconv.Atoi(portStr)
+		if port == 0 {
+			port = 8420
+		}
+		plugins = append(plugins, webui.New(port))
 	}
 
 	api := plugin.API{
@@ -87,42 +103,74 @@ func main() {
 		p.Init(api)
 	}
 
-	// Collect built-in + plugin tools.
+	cwd, _ := os.Getwd()
+	home, _ := os.UserHomeDir()
+	subagentDirs := []string{
+		filepath.Join(home, ".yak", "subagents"),
+		filepath.Join(cwd, ".yak", "subagents"),
+	}
+	defs, subagentDiags, err := subagents.LoadDefinitions(subagentDirs...)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: loading subagents: %v\n", err)
+	}
+	for _, d := range subagentDiags {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", d)
+	}
+	searchDelegationGuidelines := subagents.SearchDelegationGuidelines(defs)
+
 	builtinTools := []tools.Tool{
 		tools.NewReadTool(tools.OSFS{}),
 		tools.NewWriteTool(tools.OSFS{}),
 		tools.NewEditTool(tools.OSFS{}),
 		tools.NewBashTool(),
-		tools.NewGrepTool(),
+		tools.NewGrepTool(searchDelegationGuidelines...),
 		tools.NewLsTool(tools.OSFS{}),
-		tools.NewFindTool(),
+		tools.NewFindTool(searchDelegationGuidelines...),
 	}
-	for _, p := range plugins {
-		builtinTools = append(builtinTools, p.Tools()...)
-	}
-
-	registry := tools.NewRegistry(builtinTools...)
-	registry.AddHook(&logHook{writer: os.Stderr})
-	for _, p := range plugins {
-		for _, h := range p.Hooks() {
-			registry.AddHook(h)
-		}
-	}
+	allTools := append([]tools.Tool(nil), builtinTools...)
+	var baseHooks []tools.ToolHook
+	baseHooks = append(baseHooks, &logHook{writer: os.Stderr})
+	var runtimePlugins []subagents.RuntimePlugin
 
 	// Collect after-turn hooks and prompt sections from plugins.
 	var afterTurnHooks []plugin.AfterTurnHook
+	var agentStartHooks []plugin.AgentStartHook
+	var agentEndHooks []plugin.AgentEndHook
 	var pluginPrompts []string
 	for _, p := range plugins {
+		rp := subagents.RuntimePlugin{
+			Name:         p.Name(),
+			Tools:        p.Tools(),
+			Hooks:        p.Hooks(),
+			SystemPrompt: p.SystemPromptSection(),
+		}
+		allTools = append(allTools, rp.Tools...)
+		runtimePlugins = append(runtimePlugins, rp)
+		for _, h := range p.Hooks() {
+			baseHooks = append(baseHooks, h)
+		}
 		if ath, ok := p.(plugin.AfterTurnHook); ok {
 			afterTurnHooks = append(afterTurnHooks, ath)
+			runtimePlugins[len(runtimePlugins)-1].AfterTurnHook = ath
+		}
+		if ash, ok := p.(plugin.AgentStartHook); ok {
+			agentStartHooks = append(agentStartHooks, ash)
+			runtimePlugins[len(runtimePlugins)-1].AgentStartHook = ash
+		}
+		if aeh, ok := p.(plugin.AgentEndHook); ok {
+			agentEndHooks = append(agentEndHooks, aeh)
+			runtimePlugins[len(runtimePlugins)-1].AgentEndHook = aeh
 		}
 		if s := p.SystemPromptSection(); s != "" {
 			pluginPrompts = append(pluginPrompts, s)
 		}
 	}
 
-	cwd, _ := os.Getwd()
-	home, _ := os.UserHomeDir()
+	registry := tools.NewRegistry(allTools...)
+	for _, hook := range baseHooks {
+		registry.AddHook(hook)
+	}
+
 	skillDirs := []string{
 		filepath.Join(home, ".yak", "skills"),
 		filepath.Join(cwd, ".yak", "skills"),
@@ -135,13 +183,47 @@ func main() {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", d)
 	}
 
+	if section := subagents.BuildPromptSection(defs); section != "" {
+		pluginPrompts = append(pluginPrompts, section)
+	}
+
 	runner := cli.Runner{
-		Client:         chatClient,
-		IO:             &stdio{reader: bufio.NewReader(os.Stdin), writer: os.Stdout},
-		Registry:       registry,
-		Skills:         loadedSkills,
-		AfterTurnHooks: afterTurnHooks,
-		PluginPrompts:  pluginPrompts,
+		Client:          chatClient,
+		IO:              &stdio{reader: bufio.NewReader(os.Stdin), writer: os.Stdout},
+		Registry:        registry,
+		Skills:          loadedSkills,
+		AfterTurnHooks:  afterTurnHooks,
+		AgentStartHooks: agentStartHooks,
+		AgentEndHooks:   agentEndHooks,
+		PluginPrompts:   pluginPrompts,
+		AgentID:         "main",
+		AgentName:       "orchestrator",
+	}
+
+	subagentManager, err := subagents.NewManager(
+		func(model string) (llm.ChatClient, error) {
+			return llm.NewClient(baseURL, model, &llm.Options{
+				Timeout: 60 * time.Second,
+				APIKey:  apiKey,
+			}), nil
+		},
+		sessionDir,
+		defs,
+		builtinTools,
+		baseHooks,
+		runtimePlugins,
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: subagents disabled: %v\n", err)
+	} else {
+		registry = tools.NewRegistry(append(allTools,
+			subagents.NewSpawnTool(subagentManager),
+			subagents.NewControlTool(subagentManager),
+		)...)
+		for _, hook := range baseHooks {
+			registry.AddHook(hook)
+		}
+		runner.Registry = registry
 	}
 
 	if err := runner.Run(context.Background()); err != nil && err != io.EOF {
@@ -154,15 +236,40 @@ type logHook struct {
 	writer io.Writer
 }
 
-func (h *logHook) BeforeToolCall(name string, _ json.RawMessage) string {
-	fmt.Fprintf(h.writer, "[START] %s tool\n", strings.ToUpper(name))
+func (h *logHook) BeforeToolCall(_ tools.HookContext, name string, params json.RawMessage) string {
+	fmt.Fprintf(h.writer, "%s [STARTED]\n", formatToolCall(name, params))
 	return ""
 }
 
-func (h *logHook) AfterToolCall(name string, result tools.ToolResult, err error) {
-	status := "OK"
+func (h *logHook) AfterToolCall(_ tools.HookContext, name string, params json.RawMessage, result tools.ToolResult, err error) {
+	status := "DONE"
 	if err != nil || result.IsError {
 		status = "ERROR"
 	}
-	fmt.Fprintf(h.writer, "[DONE]  %s tool (%s)\n", strings.ToUpper(name), status)
+	fmt.Fprintf(h.writer, "%s [%s]\n", formatToolCall(name, params), status)
+}
+
+func formatToolCall(name string, params json.RawMessage) string {
+	return fmt.Sprintf("%s(%s)", name, formatParams(params))
+}
+
+func formatParams(params json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(params))
+	if trimmed == "" || trimmed == "null" {
+		return ""
+	}
+
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, params); err != nil {
+		if len(trimmed) > 160 {
+			return trimmed[:160] + "..."
+		}
+		return trimmed
+	}
+
+	formatted := compact.String()
+	if len(formatted) > 160 {
+		return formatted[:160] + "..."
+	}
+	return formatted
 }

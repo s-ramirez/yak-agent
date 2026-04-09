@@ -24,12 +24,16 @@ type IO interface {
 }
 
 type Runner struct {
-	Client         llm.ChatClient
-	IO             IO
-	Registry       *tools.Registry
-	Skills         []skills.Skill
-	AfterTurnHooks []plugin.AfterTurnHook
-	PluginPrompts  []string
+	Client          llm.ChatClient
+	IO              IO
+	Registry        *tools.Registry
+	Skills          []skills.Skill
+	AfterTurnHooks  []plugin.AfterTurnHook
+	AgentStartHooks []plugin.AgentStartHook
+	AgentEndHooks   []plugin.AgentEndHook
+	PluginPrompts   []string
+	AgentID         string // "main" or "subagent-N"
+	AgentName       string // human-readable name
 }
 
 func (r Runner) Run(ctx context.Context) error {
@@ -95,7 +99,9 @@ func (r Runner) Run(ctx context.Context) error {
 			Content: expanded,
 		})
 
-		if err := r.agentLoop(ctx, &messages, toolSchemas); err != nil {
+		if _, err := r.agentLoop(ctx, &messages, toolSchemas, func(text string) error {
+			return r.IO.Write(text + "\n")
+		}); err != nil {
 			if writeErr := r.IO.Write(fmt.Sprintf("error: %v\n", err)); writeErr != nil {
 				return writeErr
 			}
@@ -104,15 +110,43 @@ func (r Runner) Run(ctx context.Context) error {
 }
 
 const maxEmptyRetries = 2
+const emptyResponseRecoveryPrompt = "Your previous reply was empty. You must now produce a direct assistant response using the conversation and any tool results already returned. Do not call any more tools. Do not repeat completed work. If the task is complete, give the final answer now."
 
-func (r Runner) agentLoop(ctx context.Context, messages *[]types.Message, toolSchemas []types.ChatRequestTool) error {
+func (r Runner) RunConversation(
+	ctx context.Context,
+	messages []types.Message,
+	toolSchemas []types.ChatRequestTool,
+) (string, []types.Message, error) {
+	finalText, err := r.agentLoop(ctx, &messages, toolSchemas, nil)
+	return finalText, messages, err
+}
+
+func (r Runner) agentLoop(
+	ctx context.Context,
+	messages *[]types.Message,
+	toolSchemas []types.ChatRequestTool,
+	onFinalText func(string) error,
+) (finalText string, err error) {
+	lifecycleCtx := plugin.AgentLifecycleContext{
+		AgentID:   r.AgentID,
+		AgentName: r.AgentName,
+	}
+	for _, h := range r.AgentStartHooks {
+		h.OnAgentStart(lifecycleCtx)
+	}
+	defer func() {
+		for _, h := range r.AgentEndHooks {
+			h.OnAgentEnd(lifecycleCtx, finalText, err)
+		}
+	}()
+
 	hadToolCalls := false
 	emptyRetries := 0
 
 	for {
 		resp, err := r.Client.Chat(ctx, *messages, toolSchemas)
 		if err != nil {
-			return err
+			return "", err
 		}
 
 		toolCalls := types.GetToolCalls(resp)
@@ -127,17 +161,19 @@ func (r Runner) agentLoop(ctx context.Context, messages *[]types.Message, toolSc
 				})
 				*messages = append(*messages, types.Message{
 					Role:    "user",
-					Content: "Present the tool results to the user. Do not call any tools.",
+					Content: emptyResponseRecoveryPrompt,
 				})
 				continue
 			}
 
 			if text == "" {
-				text = "[no response]"
+				text = fallbackNoResponseMessage(*messages, hadToolCalls)
 			}
 
-			if err := r.IO.Write(text + "\n"); err != nil {
-				return err
+			if onFinalText != nil {
+				if err := onFinalText(text); err != nil {
+					return "", err
+				}
 			}
 
 			*messages = append(*messages, types.Message{
@@ -162,10 +198,11 @@ func (r Runner) agentLoop(ctx context.Context, messages *[]types.Message, toolSc
 			if injected {
 				continue
 			}
-			return nil
+			return text, nil
 		}
 
 		hadToolCalls = true
+		emptyRetries = 0
 
 		assistantMsg := resp.Choices[0].Message
 		*messages = append(*messages, types.Message{
@@ -204,7 +241,8 @@ func (r Runner) agentLoop(ctx context.Context, messages *[]types.Message, toolSc
 				continue
 			}
 
-			if reason := r.Registry.RunBeforeHooks(call.Function.Name, rawArgs); reason != "" {
+			hctx := tools.HookContext{AgentID: r.AgentID, AgentName: r.AgentName}
+			if reason := r.Registry.RunBeforeHooks(hctx, call.Function.Name, rawArgs); reason != "" {
 				*messages = append(*messages, types.Message{
 					Role:       "tool",
 					ToolCallID: call.ID,
@@ -214,7 +252,7 @@ func (r Runner) agentLoop(ctx context.Context, messages *[]types.Message, toolSc
 			}
 
 			result, err := tool.Execute(ctx, rawArgs)
-			r.Registry.RunAfterHooks(call.Function.Name, result, err)
+			r.Registry.RunAfterHooks(hctx, call.Function.Name, rawArgs, result, err)
 
 			if err != nil {
 				*messages = append(*messages, types.Message{
@@ -232,6 +270,60 @@ func (r Runner) agentLoop(ctx context.Context, messages *[]types.Message, toolSc
 			})
 		}
 	}
+}
+
+func fallbackNoResponseMessage(messages []types.Message, hadToolCalls bool) string {
+	if !hadToolCalls {
+		return "[no response]"
+	}
+
+	var recent []string
+	for i := len(messages) - 1; i >= 0 && len(recent) < 3; i-- {
+		msg := messages[i]
+		if msg.Role != "tool" {
+			continue
+		}
+		content, ok := msg.Content.(string)
+		if !ok {
+			continue
+		}
+		content = strings.TrimSpace(content)
+		if content == "" {
+			continue
+		}
+		recent = append([]string{content}, recent...)
+	}
+
+	if len(recent) == 0 {
+		return "[no response after tool calls]"
+	}
+
+	return "[no response after tool calls]\nRecent tool results:\n- " + strings.Join(recent, "\n- ")
+}
+
+func hasSuccessfulRecentToolResult(messages []types.Message) bool {
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if msg.Role == "assistant" || msg.Role == "user" {
+			break
+		}
+		if msg.Role != "tool" {
+			continue
+		}
+		content, ok := msg.Content.(string)
+		if !ok {
+			continue
+		}
+		content = strings.TrimSpace(content)
+		if content == "" {
+			continue
+		}
+		if strings.HasPrefix(content, "error:") {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func nullableContent(content *string) any {

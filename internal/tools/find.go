@@ -11,24 +11,8 @@ import (
 
 const findDefaultLimit = 1000
 
-type FindTool struct{}
-
-var findDefinition = ToolDefinition{
-	Name:        "find",
-	Description: "Search for files by glob pattern. Returns matching file paths relative to the search directory. Skips .git, node_modules, and other common noise directories. Output is limited to 1000 results by default.",
-	Guidelines: []string{
-		"Use find to locate files by name or extension pattern.",
-		"Use path to narrow the search to a specific subdirectory.",
-	},
-	Parameters: JSONSchema{
-		"type": "object",
-		"properties": map[string]any{
-			"pattern": map[string]any{"type": "string", "description": "Glob pattern to match files, e.g. '*.go', '**/*.json', or 'src/**/*.ts'"},
-			"path":    map[string]any{"type": "string", "description": "Directory to search in (default: current directory)"},
-			"limit":   map[string]any{"type": "number", "description": "Maximum number of results (default: 1000)"},
-		},
-		"required": []string{"pattern"},
-	},
+type FindTool struct {
+	definition ToolDefinition
 }
 
 type FindParams struct {
@@ -37,12 +21,33 @@ type FindParams struct {
 	Limit   int    `json:"limit"`
 }
 
-func NewFindTool() *FindTool {
-	return &FindTool{}
+func NewFindTool(extraGuidelines ...string) *FindTool {
+	guidelines := []string{
+		"Use find to locate files by name or extension pattern.",
+		"Use path to narrow the search to a specific subdirectory.",
+	}
+	guidelines = append(guidelines, extraGuidelines...)
+
+	return &FindTool{
+		definition: ToolDefinition{
+			Name:        "find",
+			Description: "Search for files by glob pattern. Returns matching file paths relative to the search directory. Skips .git, node_modules, and other common noise directories. Output is limited to 1000 results by default.",
+			Guidelines:  guidelines,
+			Parameters: JSONSchema{
+				"type": "object",
+				"properties": map[string]any{
+					"pattern": map[string]any{"type": "string", "description": "Glob pattern to match files, e.g. '*.go', '**/*.json', or 'src/**/*.ts'"},
+					"path":    map[string]any{"type": "string", "description": "Directory to search in (default: current directory)"},
+					"limit":   map[string]any{"type": "number", "description": "Maximum number of results (default: 1000)"},
+				},
+				"required": []string{"pattern"},
+			},
+		},
+	}
 }
 
 func (t *FindTool) Definition() ToolDefinition {
-	return findDefinition
+	return t.definition
 }
 
 func (t *FindTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult, error) {

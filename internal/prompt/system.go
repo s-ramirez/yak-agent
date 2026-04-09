@@ -117,6 +117,8 @@ func buildToolSelectionRules(available []tools.Tool) string {
 	hasGrep := false
 	hasLs := false
 	hasFind := false
+	hasSessionsSpawn := false
+	hasSubagents := false
 
 	for _, tool := range available {
 		switch tool.Definition().Name {
@@ -134,6 +136,10 @@ func buildToolSelectionRules(available []tools.Tool) string {
 			hasLs = true
 		case "find":
 			hasFind = true
+		case "sessions_spawn":
+			hasSessionsSpawn = true
+		case "subagents":
+			hasSubagents = true
 		}
 	}
 
@@ -174,6 +180,18 @@ func buildToolSelectionRules(available []tools.Tool) string {
 			"- Use find to locate files by name pattern instead of running find via bash.",
 			"- Prefer find over bash for any file search task. Only fall back to bash when you need features find does not support.",
 		)
+	}
+
+	if hasSessionsSpawn {
+		rules = append(rules,
+			"- Use sessions_spawn when a task can be delegated to a focused helper agent.",
+			"- Always provide the target subagent name and include the necessary context in the delegated task.",
+			"- Default to wait=true unless parallel progress is important.",
+		)
+	}
+
+	if hasSubagents {
+		rules = append(rules, "- Use subagents to inspect, wait on, or cancel background child runs.")
 	}
 
 	return strings.Join(rules, "\n")
