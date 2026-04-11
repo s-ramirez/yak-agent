@@ -30,7 +30,7 @@ func (c *loggedClient) Chat(_ context.Context, _ []types.Message, _ []types.Chat
 func TestManagerLogsSubagentTranscripts(t *testing.T) {
 	logDir := t.TempDir()
 	manager, err := NewManager(
-		func(model string) (llm.ChatClient, error) {
+		func(def Definition) (llm.ChatClient, error) {
 			return &loggedClient{response: "done"}, nil
 		},
 		logDir,

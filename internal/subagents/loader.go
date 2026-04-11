@@ -95,6 +95,9 @@ func loadDefinitionFile(path string) (*Definition, []string, error) {
 		diagnostics = append(diagnostics, fmt.Sprintf("%s: model is required", path))
 	}
 
+	baseURL := strings.TrimSpace(frontmatter["base_url"])
+	apiKeyEnv := strings.TrimSpace(frontmatter["api_key_env"])
+
 	tools := parseList(frontmatter["tools"])
 	if len(tools) == 0 {
 		diagnostics = append(diagnostics, fmt.Sprintf("%s: tools must contain at least one tool name", path))
@@ -115,6 +118,8 @@ func loadDefinitionFile(path string) (*Definition, []string, error) {
 		Description: description,
 		WhenToUse:   whenToUse,
 		Model:       model,
+		BaseURL:     baseURL,
+		APIKeyEnv:   apiKeyEnv,
 		Tools:       tools,
 		Plugins:     plugins,
 		Prompt:      prompt,

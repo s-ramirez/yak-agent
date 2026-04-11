@@ -8,6 +8,7 @@
 - Dynamic system prompt with environment info and tool-selection rules
 - Built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `ls`, `find`
 - Plugin system with startup-registered plugins; `tilldone` is currently disabled
+- Multi-provider sub-agents and customizable main agent via `.yak/agent.md`
 
 ## Prerequisites
 
@@ -52,6 +53,53 @@ YAK_BASE_URL=https://api.openai.com \
 YAK_MODEL=gpt-4o-mini \
 YAK_API_KEY=your-openai-api-key \
 go run ./cmd/yak
+```
+
+## Multi-provider sub-agents
+
+Each sub-agent under `.yak/subagents/` or `~/.yak/subagents/` can target its
+own provider via three frontmatter fields:
+
+| Field         | Description                                                              |
+|---------------|--------------------------------------------------------------------------|
+| `model`       | Model name passed to the API verbatim                                    |
+| `base_url`    | API base URL (the client appends `/v1/chat/completions`)                 |
+| `api_key_env` | Name of an env var holding the API key (resolved at spawn time)          |
+
+If `base_url` is omitted, the global `YAK_BASE_URL` is used. If `api_key_env`
+is set but the env var is empty, no `Authorization` header is sent (LM Studio
+works this way). Put secrets in `.env` and reference them by env var name —
+never commit keys.
+
+Example sub-agents shipped in `.yak/subagents/`: `gpt.md` (OpenAI),
+`fireworks.md` (Fireworks), `local.md` (LM Studio).
+
+`.env`:
+
+```env
+OPENAI_API_KEY=sk-...
+FIREWORKS_API_KEY=fw-...
+```
+
+## Customizing the main agent
+
+Drop a `.yak/agent.md` (project) or `~/.yak/agent.md` (user) to customize the
+orchestrator. Same frontmatter as sub-agents, plus the body becomes a
+`# Personality` section appended to the auto-built system prompt.
+
+`tools` and `model` are required. `tools` filters the available builtin and
+plugin tools; `plugins` (optional) restricts which plugins load.
+
+```yaml
+---
+model: gpt-4.1
+base_url: https://api.openai.com
+api_key_env: OPENAI_API_KEY
+tools: [read, write, edit, bash, grep, ls, find]
+plugins: [webui]
+---
+
+You are a senior Go engineer. Prefer minimal diffs and be terse.
 ```
 
 ## Testing

@@ -39,7 +39,7 @@ func (e *ClientError) Error() string {
 }
 
 func NewClient(baseURL, model string, opts *Options) *Client {
-	timeout := 60 * time.Second
+	timeout := 300 * time.Second
 	if opts != nil && opts.Timeout > 0 {
 		timeout = opts.Timeout
 	}

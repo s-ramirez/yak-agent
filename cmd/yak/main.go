@@ -65,8 +65,33 @@ func main() {
 
 	apiKey := os.Getenv("YAK_API_KEY")
 
+	cwd, _ := os.Getwd()
+	home, _ := os.UserHomeDir()
+	agentDirs := []string{
+		filepath.Join(home, ".yak"),
+		filepath.Join(cwd, ".yak"),
+	}
+	agentCfg, err := subagents.LoadAgentConfig(agentDirs...)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: loading agent config: %v\n", err)
+		os.Exit(1)
+	}
+	if agentCfg != nil {
+		baseURL = agentCfg.BaseURL
+		if baseURL == "" {
+			baseURL = os.Getenv("YAK_BASE_URL")
+			if baseURL == "" {
+				baseURL = "http://localhost:1234"
+			}
+		}
+		model = agentCfg.Model
+		if agentCfg.APIKeyEnv != "" {
+			apiKey = os.Getenv(agentCfg.APIKeyEnv)
+		}
+	}
+
 	client := llm.NewClient(baseURL, model, &llm.Options{
-		Timeout: 60 * time.Second,
+		Timeout: 300 * time.Second,
 		APIKey:  apiKey,
 	})
 
@@ -103,8 +128,6 @@ func main() {
 		p.Init(api)
 	}
 
-	cwd, _ := os.Getwd()
-	home, _ := os.UserHomeDir()
 	subagentDirs := []string{
 		filepath.Join(home, ".yak", "subagents"),
 		filepath.Join(cwd, ".yak", "subagents"),
@@ -127,10 +150,38 @@ func main() {
 		tools.NewLsTool(tools.OSFS{}),
 		tools.NewFindTool(searchDelegationGuidelines...),
 	}
+	if agentCfg != nil {
+		allowed := make(map[string]struct{}, len(agentCfg.Tools))
+		for _, name := range agentCfg.Tools {
+			allowed[name] = struct{}{}
+		}
+		filtered := builtinTools[:0]
+		for _, t := range builtinTools {
+			if _, ok := allowed[t.Definition().Name]; ok {
+				filtered = append(filtered, t)
+			}
+		}
+		builtinTools = filtered
+	}
 	allTools := append([]tools.Tool(nil), builtinTools...)
 	var baseHooks []tools.ToolHook
 	baseHooks = append(baseHooks, &logHook{writer: os.Stderr})
 	var runtimePlugins []subagents.RuntimePlugin
+
+	var allowedPlugins map[string]struct{}
+	if agentCfg != nil && len(agentCfg.Plugins) > 0 {
+		allowedPlugins = make(map[string]struct{}, len(agentCfg.Plugins))
+		for _, name := range agentCfg.Plugins {
+			allowedPlugins[name] = struct{}{}
+		}
+	}
+	var allowedTools map[string]struct{}
+	if agentCfg != nil {
+		allowedTools = make(map[string]struct{}, len(agentCfg.Tools))
+		for _, name := range agentCfg.Tools {
+			allowedTools[name] = struct{}{}
+		}
+	}
 
 	// Collect after-turn hooks and prompt sections from plugins.
 	var afterTurnHooks []plugin.AfterTurnHook
@@ -138,9 +189,24 @@ func main() {
 	var agentEndHooks []plugin.AgentEndHook
 	var pluginPrompts []string
 	for _, p := range plugins {
+		if allowedPlugins != nil {
+			if _, ok := allowedPlugins[p.Name()]; !ok {
+				continue
+			}
+		}
+		pluginTools := p.Tools()
+		if allowedTools != nil {
+			filtered := pluginTools[:0]
+			for _, t := range pluginTools {
+				if _, ok := allowedTools[t.Definition().Name]; ok {
+					filtered = append(filtered, t)
+				}
+			}
+			pluginTools = filtered
+		}
 		rp := subagents.RuntimePlugin{
 			Name:         p.Name(),
-			Tools:        p.Tools(),
+			Tools:        pluginTools,
 			Hooks:        p.Hooks(),
 			SystemPrompt: p.SystemPromptSection(),
 		}
@@ -187,6 +253,10 @@ func main() {
 		pluginPrompts = append(pluginPrompts, section)
 	}
 
+	if agentCfg != nil && agentCfg.Prompt != "" {
+		pluginPrompts = append([]string{"# Personality\n" + agentCfg.Prompt}, pluginPrompts...)
+	}
+
 	runner := cli.Runner{
 		Client:          chatClient,
 		IO:              &stdio{reader: bufio.NewReader(os.Stdin), writer: os.Stdout},
@@ -201,10 +271,18 @@ func main() {
 	}
 
 	subagentManager, err := subagents.NewManager(
-		func(model string) (llm.ChatClient, error) {
-			return llm.NewClient(baseURL, model, &llm.Options{
-				Timeout: 60 * time.Second,
-				APIKey:  apiKey,
+		func(def subagents.Definition) (llm.ChatClient, error) {
+			u := def.BaseURL
+			if u == "" {
+				u = baseURL
+			}
+			key := apiKey
+			if def.APIKeyEnv != "" {
+				key = os.Getenv(def.APIKeyEnv)
+			}
+			return llm.NewClient(u, def.Model, &llm.Options{
+				Timeout: 300 * time.Second,
+				APIKey:  key,
 			}), nil
 		},
 		sessionDir,

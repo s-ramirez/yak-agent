@@ -18,7 +18,7 @@ import (
 	"yak-go/internal/types"
 )
 
-type ClientFactory func(model string) (llm.ChatClient, error)
+type ClientFactory func(def Definition) (llm.ChatClient, error)
 
 type SpawnRequest struct {
 	Agent     string
@@ -288,7 +288,7 @@ func (m *Manager) execute(run *childRun, req SpawnRequest, def Definition) {
 		snapshot.StartedAt = &startedAt
 	})
 
-	client, err := m.clientFactory(def.Model)
+	client, err := m.clientFactory(def)
 	if err != nil {
 		completedAt := time.Now()
 		m.update(run.snapshot.RunID, func(snapshot *RunSnapshot) {

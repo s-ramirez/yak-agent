@@ -10,6 +10,8 @@ type Definition struct {
 	Description string
 	WhenToUse   string
 	Model       string
+	BaseURL     string
+	APIKeyEnv   string
 	Tools       []string
 	Plugins     []string
 	Prompt      string

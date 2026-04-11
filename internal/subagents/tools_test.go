@@ -60,8 +60,8 @@ func TestSpawnToolRunsNamedAgent(t *testing.T) {
 		Prompt:    "You are Scout.",
 	}
 	manager, err := NewManager(
-		func(model string) (llm.ChatClient, error) {
-			client.model = model
+		func(def Definition) (llm.ChatClient, error) {
+			client.model = def.Model
 			return client, nil
 		},
 		"",
@@ -113,7 +113,7 @@ func TestSpawnToolRunsNamedAgent(t *testing.T) {
 func TestSubagentsToolListsBackgroundRuns(t *testing.T) {
 	client := &recordingClient{response: "background result"}
 	manager, err := NewManager(
-		func(model string) (llm.ChatClient, error) {
+		func(def Definition) (llm.ChatClient, error) {
 			return client, nil
 		},
 		"",
