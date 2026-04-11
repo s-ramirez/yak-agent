@@ -34,6 +34,7 @@ type Runner struct {
 	PluginPrompts   []string
 	AgentID         string // "main" or "subagent-N"
 	AgentName       string // human-readable name
+	Prompt          string // opening of the system prompt (from agent.md body)
 }
 
 func (r Runner) Run(ctx context.Context) error {
@@ -65,7 +66,7 @@ func (r Runner) Run(ctx context.Context) error {
 
 	messages := []types.Message{{
 		Role:    "system",
-		Content: prompt.BuildSystemPrompt(availableTools, r.Skills, env, r.PluginPrompts),
+		Content: prompt.BuildSystemPrompt(r.Prompt, availableTools, r.Skills, env, r.PluginPrompts),
 	}}
 
 	for {

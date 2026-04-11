@@ -253,8 +253,9 @@ func main() {
 		pluginPrompts = append(pluginPrompts, section)
 	}
 
-	if agentCfg != nil && agentCfg.Prompt != "" {
-		pluginPrompts = append([]string{"# Personality\n" + agentCfg.Prompt}, pluginPrompts...)
+	var agentPrompt string
+	if agentCfg != nil {
+		agentPrompt = agentCfg.Prompt
 	}
 
 	runner := cli.Runner{
@@ -268,6 +269,7 @@ func main() {
 		PluginPrompts:   pluginPrompts,
 		AgentID:         "main",
 		AgentName:       "orchestrator",
+		Prompt:          agentPrompt,
 	}
 
 	subagentManager, err := subagents.NewManager(

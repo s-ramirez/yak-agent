@@ -16,7 +16,7 @@ func TestBuildSystemPromptIncludesToolSections(t *testing.T) {
 		Time:      "2025-01-15T10:30:00Z",
 	}
 
-	got := BuildSystemPrompt([]tools.Tool{
+	got := BuildSystemPrompt("", []tools.Tool{
 		tools.NewReadTool(tools.OSFS{}),
 		tools.NewWriteTool(tools.OSFS{}),
 		tools.NewEditTool(tools.OSFS{}),
@@ -55,7 +55,7 @@ func TestBuildSystemPromptIncludesToolSections(t *testing.T) {
 func TestBuildSystemPromptIncludesPluginSections(t *testing.T) {
 	env := Environment{OS: "linux", Arch: "amd64"}
 
-	got := BuildSystemPrompt(nil, nil, env, []string{
+	got := BuildSystemPrompt("", nil, nil, env, []string{
 		"# My Plugin\nDo something special.",
 		"",
 		"# Another Plugin\nMore instructions.",

@@ -16,10 +16,13 @@ type Environment struct {
 	Time      string
 }
 
-func BuildSystemPrompt(available []tools.Tool, loadedSkills []skills.Skill, env Environment, pluginSections []string) string {
-	sections := []string{
-		"You are a coding assistant. You help the user by reading, writing, editing files, and executing commands when needed.",
+const defaultPrompt = "You are a coding assistant. You help the user by reading, writing, editing files, and executing commands when needed."
+
+func BuildSystemPrompt(agentPrompt string, available []tools.Tool, loadedSkills []skills.Skill, env Environment, pluginSections []string) string {
+	if strings.TrimSpace(agentPrompt) == "" {
+		agentPrompt = defaultPrompt
 	}
+	sections := []string{agentPrompt}
 
 	sections = append(sections, buildEnvironment(env))
 
