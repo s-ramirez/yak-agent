@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"yak-go/internal/compaction"
 	"yak-go/internal/llm"
+	"yak-go/internal/memory"
 	"yak-go/internal/plugin"
 	"yak-go/internal/prompt"
 	"yak-go/internal/skills"
@@ -38,9 +40,32 @@ type Runner struct {
 	ContextSize     int    // model context window in tokens; 0 = unknown
 	OnUsage         func(usage *types.Usage)
 	UsageHooks      []plugin.UsageHook
+
+	// MemoryStore, if set, provides persistent memory for the agent.
+	// When non-nil, MEMORY.md is loaded and injected into the system prompt
+	// and DistillMemory can be invoked to refresh MEMORY.md.
+	MemoryStore *memory.Store
+
+	// OnUserInput, if set, is invoked every time a non-empty user line is
+	// received in the interactive REPL. Used to gate auto-distill.
+	OnUserInput func()
+
+	// Compaction, if enabled, automatically trims old messages once the
+	// estimated context usage crosses the threshold. Only fires when
+	// ContextSize > 0.
+	Compaction compaction.Settings
+
+	// lastSummary carries the previous compaction summary forward so the
+	// next compaction can use the UPDATE_SUMMARIZATION_PROMPT variant.
+	lastSummary string
+
+	// lastUsage tracks the most recent authoritative token count returned
+	// by the LLM so compaction can use it across turns.
+	lastUsage      *types.Usage
+	lastUsageIndex int
 }
 
-func (r Runner) Run(ctx context.Context) error {
+func (r *Runner) Run(ctx context.Context) error {
 	if r.Client == nil {
 		return fmt.Errorf("client is required")
 	}
@@ -67,9 +92,10 @@ func (r Runner) Run(ctx context.Context) error {
 		Time:      now.Format(time.RFC3339),
 	}
 
+	curated := r.loadCuratedMemory()
 	messages := []types.Message{{
 		Role:    "system",
-		Content: prompt.BuildSystemPrompt(r.Prompt, availableTools, r.Skills, env, r.PluginPrompts),
+		Content: prompt.BuildSystemPrompt(r.Prompt, availableTools, r.Skills, env, curated, r.PluginPrompts),
 	}}
 
 	for {
@@ -88,6 +114,9 @@ func (r Runner) Run(ctx context.Context) error {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			continue
+		}
+		if r.OnUserInput != nil {
+			r.OnUserInput()
 		}
 
 		expanded, err := r.expandSkillCommand(trimmed)
@@ -116,7 +145,7 @@ func (r Runner) Run(ctx context.Context) error {
 const maxEmptyRetries = 2
 const emptyResponseRecoveryPrompt = "Your previous reply was empty. You must now produce a direct assistant response using the conversation and any tool results already returned. Do not call any more tools. Do not repeat completed work. If the task is complete, give the final answer now."
 
-func (r Runner) RunConversation(
+func (r *Runner) RunConversation(
 	ctx context.Context,
 	messages []types.Message,
 	toolSchemas []types.ChatRequestTool,
@@ -125,7 +154,7 @@ func (r Runner) RunConversation(
 	return finalText, messages, err
 }
 
-func (r Runner) agentLoop(
+func (r *Runner) agentLoop(
 	ctx context.Context,
 	messages *[]types.Message,
 	toolSchemas []types.ChatRequestTool,
@@ -146,14 +175,26 @@ func (r Runner) agentLoop(
 
 	hadToolCalls := false
 	emptyRetries := 0
+	if r.lastUsageIndex == 0 {
+		r.lastUsageIndex = -1
+	}
 
 	for {
+		if r.maybeCompact(ctx, messages) {
+			hadToolCalls = false
+			emptyRetries = 0
+		}
+
 		resp, err := r.Client.Chat(ctx, *messages, toolSchemas)
 		if err != nil {
 			return "", err
 		}
 
 		r.reportUsage(resp)
+		if resp.Usage != nil {
+			r.lastUsage = resp.Usage
+			r.lastUsageIndex = len(*messages) - 1
+		}
 
 		toolCalls := types.GetToolCalls(resp)
 		if len(toolCalls) == 0 {
@@ -282,6 +323,45 @@ func (r Runner) agentLoop(
 	}
 }
 
+// maybeCompact checks the budget and, if triggered, replaces *messages
+// with a compacted version in place. Returns true when compaction ran
+// successfully so callers can reset per-turn state.
+func (r *Runner) maybeCompact(ctx context.Context, messages *[]types.Message) bool {
+	if !r.Compaction.Enabled || r.ContextSize <= 0 {
+		return false
+	}
+	tokens := compaction.EstimateContextTokens(*messages, r.lastUsage, r.lastUsageIndex)
+	if !compaction.ShouldCompact(tokens, r.ContextSize, r.Compaction) {
+		return false
+	}
+
+	if r.IO != nil {
+		_ = r.IO.Write(compaction.FormatTriggerLine(tokens, r.ContextSize, r.Compaction) + "\n")
+	}
+
+	res, err := compaction.Compact(ctx, r.Client, *messages, r.lastSummary, r.Compaction, tokens)
+	if err != nil {
+		if r.IO != nil {
+			_ = r.IO.Write(fmt.Sprintf("[compaction failed: %v]\n", err))
+		}
+		return false
+	}
+	if res.Summary == "" {
+		return false
+	}
+
+	*messages = res.Messages
+	r.lastSummary = res.Summary
+	r.lastUsage = nil
+	r.lastUsageIndex = -1
+
+	if r.IO != nil {
+		after := compaction.EstimateContextTokens(*messages, nil, -1)
+		_ = r.IO.Write(fmt.Sprintf("[compacted: %d → %d tokens]\n", tokens, after))
+	}
+	return true
+}
+
 func fallbackNoResponseMessage(messages []types.Message, hadToolCalls bool) string {
 	if !hadToolCalls {
 		return "[no response]"
@@ -311,7 +391,7 @@ func fallbackNoResponseMessage(messages []types.Message, hadToolCalls bool) stri
 	return "[no response after tool calls]\nRecent tool results:\n- " + strings.Join(recent, "\n- ")
 }
 
-func (r Runner) reportUsage(resp *types.ChatResponse) {
+func (r *Runner) reportUsage(resp *types.ChatResponse) {
 	if resp == nil || resp.Usage == nil {
 		return
 	}
@@ -346,11 +426,27 @@ func (r Runner) reportUsage(resp *types.ChatResponse) {
 }
 
 const skillPrefix = "/skill:"
+const memoryDistillCommand = "/memory:distill"
 
-// expandSkillCommand checks if input starts with /skill:<name> and expands it
-// to the skill's file content plus any trailing arguments. If the input is not
-// a skill command, it is returned unchanged.
-func (r Runner) expandSkillCommand(input string) (string, error) {
+// distillInstruction is the fixed prompt used by both the manual
+// /memory:distill slash command and the auto-distill flow on session exit.
+const distillInstruction = `Review this session and refresh long-term memory.
+
+1. Call memory_read with path="MEMORY.md" to see current curated memory. A missing file is fine.
+2. Call memory_list with dir="sessions" to see available session notes. Read recent ones that look relevant with memory_read.
+3. Decide whether this session produced anything worth preserving long-term: user preferences, active priorities, hard-won lessons, durable facts. Skip anything already in the agent config, skills, or obvious from project files.
+4. If there is something worth updating, call memory_write with path="MEMORY.md", mode="overwrite", and content containing a refreshed MEMORY.md (aim for under 3000 characters, plain Markdown, no frontmatter required). Then reply with one short sentence summarizing what changed.
+5. If nothing needs updating, reply with exactly: NO_UPDATE
+
+Do not ask the user questions — this is a background review.`
+
+// expandSkillCommand checks if input starts with /skill:<name> or
+// /memory:distill and expands it to an appropriate prompt. If the input is
+// not a recognized command, it is returned unchanged.
+func (r *Runner) expandSkillCommand(input string) (string, error) {
+	if input == memoryDistillCommand {
+		return distillInstruction, nil
+	}
 	if !strings.HasPrefix(input, skillPrefix) {
 		return input, nil
 	}
@@ -378,4 +474,57 @@ func (r Runner) expandSkillCommand(input string) (string, error) {
 	}
 
 	return "", fmt.Errorf("unknown skill %q", name)
+}
+
+// loadCuratedMemory reads MEMORY.md if a store is configured. Returns "" on
+// any error or missing file — memory is best-effort, never fatal.
+func (r *Runner) loadCuratedMemory() string {
+	if r.MemoryStore == nil {
+		return ""
+	}
+	curated, err := r.MemoryStore.LoadCurated()
+	if err != nil {
+		return ""
+	}
+	return curated
+}
+
+// DistillMemory runs a single non-interactive agent turn that asks the model
+// to refresh MEMORY.md based on this session's work. Only the top-level
+// runner (AgentID == "main") executes; subagents are no-ops. Intended to be
+// called from the main entry point after the interactive REPL exits.
+func (r *Runner) DistillMemory(ctx context.Context) error {
+	if r.MemoryStore == nil || r.AgentID != "main" {
+		return nil
+	}
+	if r.Client == nil {
+		return fmt.Errorf("client is required")
+	}
+
+	var availableTools []tools.Tool
+	var toolSchemas []types.ChatRequestTool
+	if r.Registry != nil {
+		availableTools = r.Registry.List()
+		toolSchemas = r.Registry.Schemas()
+	}
+
+	now := time.Now()
+	tz, _ := now.Zone()
+	cwd, _ := os.Getwd()
+	env := prompt.Environment{
+		OS:        runtime.GOOS,
+		Arch:      runtime.GOARCH,
+		Workspace: cwd,
+		Timezone:  tz,
+		Time:      now.Format(time.RFC3339),
+	}
+
+	curated := r.loadCuratedMemory()
+	messages := []types.Message{
+		{Role: "system", Content: prompt.BuildSystemPrompt(r.Prompt, availableTools, r.Skills, env, curated, r.PluginPrompts)},
+		{Role: "user", Content: distillInstruction},
+	}
+
+	_, err := r.agentLoop(ctx, &messages, toolSchemas, nil)
+	return err
 }

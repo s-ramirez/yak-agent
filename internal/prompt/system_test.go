@@ -24,7 +24,7 @@ func TestBuildSystemPromptIncludesToolSections(t *testing.T) {
 		tools.NewGrepTool(),
 		tools.NewLsTool(tools.OSFS{}),
 		tools.NewFindTool(),
-	}, nil, env, nil)
+	}, nil, env, "", nil)
 
 	for _, fragment := range []string{
 		"# Environment",
@@ -55,7 +55,7 @@ func TestBuildSystemPromptIncludesToolSections(t *testing.T) {
 func TestBuildSystemPromptIncludesPluginSections(t *testing.T) {
 	env := Environment{OS: "linux", Arch: "amd64"}
 
-	got := BuildSystemPrompt("", nil, nil, env, []string{
+	got := BuildSystemPrompt("", nil, nil, env, "", []string{
 		"# My Plugin\nDo something special.",
 		"",
 		"# Another Plugin\nMore instructions.",

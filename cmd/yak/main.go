@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"yak-go/internal/cli"
+	"yak-go/internal/compaction"
 	"yak-go/internal/llm"
+	"yak-go/internal/memory"
 	"yak-go/internal/plugin"
 	"yak-go/internal/plugin/webui"
 	"yak-go/internal/skills"
@@ -139,6 +141,8 @@ func main() {
 	}
 	searchDelegationGuidelines := subagents.SearchDelegationGuidelines(defs)
 
+	memoryStore := memory.NewStore(filepath.Join(cwd, ".yak", "memory"))
+
 	builtinTools := []tools.Tool{
 		tools.NewReadTool(tools.OSFS{}),
 		tools.NewWriteTool(tools.OSFS{}),
@@ -147,6 +151,10 @@ func main() {
 		tools.NewGrepTool(searchDelegationGuidelines...),
 		tools.NewLsTool(tools.OSFS{}),
 		tools.NewFindTool(searchDelegationGuidelines...),
+		tools.NewMemoryReadTool(memoryStore),
+		tools.NewMemoryWriteTool(memoryStore),
+		tools.NewMemorySearchTool(memoryStore),
+		tools.NewMemoryListTool(memoryStore),
 	}
 	var allowedTools, allowedPlugins map[string]struct{}
 	if agentCfg != nil {
@@ -237,6 +245,7 @@ func main() {
 		contextSize = agentCfg.ContextSize
 	}
 
+	var userActivity bool
 	runner := cli.Runner{
 		Client:          chatClient,
 		IO:              &stdio{reader: bufio.NewReader(os.Stdin), writer: os.Stdout},
@@ -251,6 +260,9 @@ func main() {
 		AgentName:       "orchestrator",
 		Prompt:          agentPrompt,
 		ContextSize:     contextSize,
+		MemoryStore:     memoryStore,
+		OnUserInput:     func() { userActivity = true },
+		Compaction:      compaction.DefaultSettings,
 	}
 
 	subagentManager, err := subagents.NewManager(
@@ -288,8 +300,14 @@ func main() {
 		runner.Registry = registry
 	}
 
-	if err := runner.Run(context.Background()); err != nil && err != io.EOF {
-		_, _ = fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	runErr := runner.Run(context.Background())
+	if userActivity {
+		if err := runner.DistillMemory(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: memory distill failed: %v\n", err)
+		}
+	}
+	if runErr != nil && runErr != io.EOF {
+		_, _ = fmt.Fprintf(os.Stderr, "error: %v\n", runErr)
 		os.Exit(1)
 	}
 }

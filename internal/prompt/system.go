@@ -18,13 +18,17 @@ type Environment struct {
 
 const defaultPrompt = "You are a coding assistant. You help the user by reading, writing, editing files, and executing commands when needed."
 
-func BuildSystemPrompt(agentPrompt string, available []tools.Tool, loadedSkills []skills.Skill, env Environment, pluginSections []string) string {
+func BuildSystemPrompt(agentPrompt string, available []tools.Tool, loadedSkills []skills.Skill, env Environment, curatedMemory string, pluginSections []string) string {
 	if strings.TrimSpace(agentPrompt) == "" {
 		agentPrompt = defaultPrompt
 	}
 	sections := []string{agentPrompt}
 
 	sections = append(sections, buildEnvironment(env))
+
+	if s := buildCuratedMemorySection(curatedMemory, available); s != "" {
+		sections = append(sections, s)
+	}
 
 	if len(available) > 0 {
 		sections = append(sections, buildToolGuidelines(available))
@@ -42,6 +46,34 @@ func BuildSystemPrompt(agentPrompt string, available []tools.Tool, loadedSkills 
 	}
 
 	return strings.Join(sections, "\n\n")
+}
+
+func buildCuratedMemorySection(curated string, available []tools.Tool) string {
+	curated = strings.TrimSpace(curated)
+	hasMemoryTools := false
+	for _, t := range available {
+		if strings.HasPrefix(t.Definition().Name, "memory_") {
+			hasMemoryTools = true
+			break
+		}
+	}
+	if curated == "" && !hasMemoryTools {
+		return ""
+	}
+
+	lines := []string{"# Memory"}
+	if hasMemoryTools {
+		lines = append(lines,
+			"You have a persistent memory store at .yak/memory/ with three layers:",
+			"- MEMORY.md — curated long-term facts (shown below). Only the /memory:distill flow should rewrite it.",
+			"- sessions/YYYY-MM-DD-HHMM.md — durable session notes. Use memory_write to save anything worth remembering from this session.",
+			"- vault/{Memory,Knowledge,Journal,Notes}/*.md — permanent reference notes. Use memory_read/memory_search/memory_list to recall.",
+		)
+	}
+	if curated != "" {
+		lines = append(lines, "", "<curated_memory>", curated, "</curated_memory>")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func buildSkillsSection(loadedSkills []skills.Skill) string {
