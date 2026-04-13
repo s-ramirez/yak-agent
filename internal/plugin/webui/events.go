@@ -14,15 +14,19 @@ const (
 	EventToolEnd    EventType = "tool_end"
 	EventAgentSpawn EventType = "agent_spawn"
 	EventAgentDone  EventType = "agent_done"
+	EventAgentUsage EventType = "agent_usage"
 )
 
 type Event struct {
-	Type      EventType `json:"type"`
-	Timestamp int64     `json:"ts"`
-	AgentID   string    `json:"agent_id"`
-	AgentName string    `json:"agent_name"`
-	ToolName  string    `json:"tool,omitempty"`
-	Status    string    `json:"status,omitempty"`
+	Type         EventType `json:"type"`
+	Timestamp    int64     `json:"ts"`
+	AgentID      string    `json:"agent_id"`
+	AgentName    string    `json:"agent_name"`
+	ToolName     string    `json:"tool,omitempty"`
+	Status       string    `json:"status,omitempty"`
+	PromptTokens int       `json:"prompt_tokens,omitempty"`
+	TotalTokens  int       `json:"total_tokens,omitempty"`
+	ContextSize  int       `json:"context_size,omitempty"`
 }
 
 const (

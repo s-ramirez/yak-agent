@@ -5,6 +5,7 @@ import (
 
 	"yak-go/internal/plugin"
 	"yak-go/internal/tools"
+	"yak-go/internal/types"
 )
 
 type WebUI struct {
@@ -50,5 +51,19 @@ func (w *WebUI) OnAgentEnd(ctx plugin.AgentLifecycleContext, _ string, _ error) 
 		Type:      EventAgentEnd,
 		AgentID:   ctx.AgentID,
 		AgentName: ctx.AgentName,
+	})
+}
+
+func (w *WebUI) OnUsage(ctx plugin.AgentLifecycleContext, usage *types.Usage, contextSize int) {
+	if usage == nil {
+		return
+	}
+	w.bus.Publish(Event{
+		Type:         EventAgentUsage,
+		AgentID:      ctx.AgentID,
+		AgentName:    ctx.AgentName,
+		PromptTokens: usage.PromptTokens,
+		TotalTokens:  usage.TotalTokens,
+		ContextSize:  contextSize,
 	})
 }

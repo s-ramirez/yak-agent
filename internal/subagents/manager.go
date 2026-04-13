@@ -60,15 +60,32 @@ type childRun struct {
 }
 
 type Manager struct {
-	clientFactory ClientFactory
-	logDir        string
-	builtinTools  []tools.Tool
-	baseHooks     []tools.ToolHook
-	plugins       map[string]RuntimePlugin
-	definitions   map[string]Definition
-	runs          map[string]*childRun
-	nextID        uint64
-	mu            sync.RWMutex
+	clientFactory    ClientFactory
+	logDir           string
+	builtinTools     []tools.Tool
+	baseHooks        []tools.ToolHook
+	baseAgentStart   []plugin.AgentStartHook
+	baseAgentEnd     []plugin.AgentEndHook
+	baseUsage        []plugin.UsageHook
+	plugins          map[string]RuntimePlugin
+	definitions      map[string]Definition
+	runs             map[string]*childRun
+	nextID           uint64
+	mu               sync.RWMutex
+}
+
+// SetBaseObservers installs observation hooks that apply to every subagent
+// run regardless of def.Plugins — mirroring how baseHooks already applies
+// tool hooks globally. Intended for plugins like the webui that passively
+// observe all agents.
+func (m *Manager) SetBaseObservers(
+	start []plugin.AgentStartHook,
+	end []plugin.AgentEndHook,
+	usage []plugin.UsageHook,
+) {
+	m.baseAgentStart = append([]plugin.AgentStartHook(nil), start...)
+	m.baseAgentEnd = append([]plugin.AgentEndHook(nil), end...)
+	m.baseUsage = append([]plugin.UsageHook(nil), usage...)
 }
 
 func NewManager(clientFactory ClientFactory, logDir string, defs []Definition, builtinTools []tools.Tool, baseHooks []tools.ToolHook, plugins []RuntimePlugin) (*Manager, error) {
@@ -100,7 +117,7 @@ func NewManager(clientFactory ClientFactory, logDir string, defs []Definition, b
 	}
 
 	for _, def := range defs {
-		_, _, _, _, _, err := manager.buildRuntime(def)
+		_, _, _, err := manager.buildRuntime(def)
 		if err != nil {
 			return nil, fmt.Errorf("subagent %q: %w", def.Name, err)
 		}
@@ -214,12 +231,19 @@ func (m *Manager) Kill(runID string) (RunSnapshot, error) {
 	return snapshot, nil
 }
 
-func (m *Manager) buildRuntime(def Definition) (*tools.Registry, []string, []plugin.AfterTurnHook, []plugin.AgentStartHook, []plugin.AgentEndHook, error) {
+type runtimeHooks struct {
+	afterTurn   []plugin.AfterTurnHook
+	agentStart  []plugin.AgentStartHook
+	agentEnd    []plugin.AgentEndHook
+	usage       []plugin.UsageHook
+}
+
+func (m *Manager) buildRuntime(def Definition) (*tools.Registry, []string, runtimeHooks, error) {
 	allowedPlugins := make(map[string]RuntimePlugin, len(def.Plugins))
 	for _, name := range def.Plugins {
 		plugin, ok := m.plugins[name]
 		if !ok {
-			return nil, nil, nil, nil, nil, fmt.Errorf("unknown plugin %q", name)
+			return nil, nil, runtimeHooks{}, fmt.Errorf("unknown plugin %q", name)
 		}
 		allowedPlugins[name] = plugin
 	}
@@ -238,7 +262,7 @@ func (m *Manager) buildRuntime(def Definition) (*tools.Registry, []string, []plu
 	for _, name := range def.Tools {
 		tool, ok := allTools[name]
 		if !ok {
-			return nil, nil, nil, nil, nil, fmt.Errorf("unknown tool %q", name)
+			return nil, nil, runtimeHooks{}, fmt.Errorf("unknown tool %q", name)
 		}
 		selectedTools = append(selectedTools, tool)
 	}
@@ -249,29 +273,33 @@ func (m *Manager) buildRuntime(def Definition) (*tools.Registry, []string, []plu
 	}
 
 	var prompts []string
-	var afterTurnHooks []plugin.AfterTurnHook
-	var agentStartHooks []plugin.AgentStartHook
-	var agentEndHooks []plugin.AgentEndHook
+	var hooks runtimeHooks
+	hooks.agentStart = append(hooks.agentStart, m.baseAgentStart...)
+	hooks.agentEnd = append(hooks.agentEnd, m.baseAgentEnd...)
+	hooks.usage = append(hooks.usage, m.baseUsage...)
 	for _, name := range def.Plugins {
-		plugin := allowedPlugins[name]
-		for _, hook := range plugin.Hooks {
+		p := allowedPlugins[name]
+		for _, hook := range p.Hooks {
 			registry.AddHook(hook)
 		}
-		if plugin.SystemPrompt != "" {
-			prompts = append(prompts, plugin.SystemPrompt)
+		if p.SystemPrompt != "" {
+			prompts = append(prompts, p.SystemPrompt)
 		}
-		if plugin.AfterTurnHook != nil {
-			afterTurnHooks = append(afterTurnHooks, plugin.AfterTurnHook)
+		if p.AfterTurnHook != nil {
+			hooks.afterTurn = append(hooks.afterTurn, p.AfterTurnHook)
 		}
-		if plugin.AgentStartHook != nil {
-			agentStartHooks = append(agentStartHooks, plugin.AgentStartHook)
+		if p.AgentStartHook != nil {
+			hooks.agentStart = append(hooks.agentStart, p.AgentStartHook)
 		}
-		if plugin.AgentEndHook != nil {
-			agentEndHooks = append(agentEndHooks, plugin.AgentEndHook)
+		if p.AgentEndHook != nil {
+			hooks.agentEnd = append(hooks.agentEnd, p.AgentEndHook)
+		}
+		if p.UsageHook != nil {
+			hooks.usage = append(hooks.usage, p.UsageHook)
 		}
 	}
 
-	return registry, prompts, afterTurnHooks, agentStartHooks, agentEndHooks, nil
+	return registry, prompts, hooks, nil
 }
 
 func (m *Manager) execute(run *childRun, req SpawnRequest, def Definition) {
@@ -314,7 +342,7 @@ func (m *Manager) execute(run *childRun, req SpawnRequest, def Definition) {
 		return
 	}
 
-	registry, _, afterTurnHooks, agentStartHooks, agentEndHooks, err := m.buildRuntime(def)
+	registry, _, hooks, err := m.buildRuntime(def)
 	if err != nil {
 		completedAt := time.Now()
 		m.update(run.snapshot.RunID, func(snapshot *RunSnapshot) {
@@ -334,9 +362,10 @@ func (m *Manager) execute(run *childRun, req SpawnRequest, def Definition) {
 		Client:          client,
 		Registry:        registry,
 		Skills:          nil,
-		AfterTurnHooks:  afterTurnHooks,
-		AgentStartHooks: agentStartHooks,
-		AgentEndHooks:   agentEndHooks,
+		AfterTurnHooks:  hooks.afterTurn,
+		AgentStartHooks: hooks.agentStart,
+		AgentEndHooks:   hooks.agentEnd,
+		UsageHooks:      hooks.usage,
 		PluginPrompts:   nil,
 		AgentID:         runID,
 		AgentName:       def.Name,

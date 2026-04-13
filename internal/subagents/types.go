@@ -27,4 +27,5 @@ type RuntimePlugin struct {
 	AfterTurnHook  plugin.AfterTurnHook
 	AgentStartHook plugin.AgentStartHook
 	AgentEndHook   plugin.AgentEndHook
+	UsageHook      plugin.UsageHook
 }

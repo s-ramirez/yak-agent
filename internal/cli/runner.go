@@ -37,6 +37,7 @@ type Runner struct {
 	Prompt          string // opening of the system prompt (from agent.md body)
 	ContextSize     int    // model context window in tokens; 0 = unknown
 	OnUsage         func(usage *types.Usage)
+	UsageHooks      []plugin.UsageHook
 }
 
 func (r Runner) Run(ctx context.Context) error {
@@ -334,6 +335,15 @@ func hasSuccessfulRecentToolResult(messages []types.Message) bool {
 func (r Runner) reportUsage(resp *types.ChatResponse) {
 	if resp == nil || resp.Usage == nil {
 		return
+	}
+	for _, h := range r.UsageHooks {
+		if h == nil {
+			continue
+		}
+		h.OnUsage(plugin.AgentLifecycleContext{
+			AgentID:   r.AgentID,
+			AgentName: r.AgentName,
+		}, resp.Usage, r.ContextSize)
 	}
 	if r.OnUsage != nil {
 		r.OnUsage(resp.Usage)

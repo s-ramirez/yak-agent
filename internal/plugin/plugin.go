@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"yak-go/internal/tools"
+	"yak-go/internal/types"
 )
 
 // API provides plugins with controlled access to the host system.
@@ -54,4 +55,11 @@ type AgentStartHook interface {
 // It is called when an agent run finishes processing a request.
 type AgentEndHook interface {
 	OnAgentEnd(ctx AgentLifecycleContext, finalText string, err error)
+}
+
+// UsageHook is an optional interface plugins can implement.
+// It is called after each LLM response with the reported token usage
+// and the configured context window for the agent (0 if unknown).
+type UsageHook interface {
+	OnUsage(ctx AgentLifecycleContext, usage *types.Usage, contextSize int)
 }

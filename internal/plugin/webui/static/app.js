@@ -1,39 +1,32 @@
 // ── Constants ────────────────────────────────────────────────────────
 
-const CANVAS_W = 800;
-const CANVAS_H = 600;
-const LERP_SPEED = 6;
-const AGENT_RADIUS = 14;
-const MIN_TRAVEL_TIME = 0.25;   // seconds: minimum time to reach station
-const MIN_DWELL_TIME = 0.35;    // seconds: minimum time working at station
-const STATION_W = 80;
-const STATION_H = 60;
+const WALK_SPEED = 64;           // pixels per second (constant, axis-aligned)
+const MIN_DWELL_TIME = 0.35;     // seconds working at station
+const WALK_FRAME_DISTANCE = 8;   // pixels between walk frame flips
 
-const AGENT_COLORS = [
-    '#e63946', '#457b9d', '#2a9d8f', '#e9c46a',
-    '#f4a261', '#264653', '#6a4c93', '#1982c4',
-];
+const DIR_DOWN = 0;
+const DIR_UP = 1;
+const DIR_LEFT = 2;
+const DIR_RIGHT = 3;
 
-// Tool station layout positions.
-const STATION_DEFS = {
-    'bash':           { x: 120, y: 80,  color: '#4a4e69', icon: 'terminal' },
-    'read':           { x: 360, y: 80,  color: '#457b9d', icon: 'book' },
-    'write':          { x: 600, y: 80,  color: '#2a9d8f', icon: 'pencil' },
-    'edit':           { x: 120, y: 220, color: '#e76f51', icon: 'wrench' },
-    'grep':           { x: 360, y: 220, color: '#7209b7', icon: 'search' },
-    'ls':             { x: 600, y: 220, color: '#e9c46a', icon: 'folder' },
-    'find':           { x: 200, y: 360, color: '#219ebc', icon: 'binoculars' },
-    'sessions_spawn': { x: 500, y: 360, color: '#d62828', icon: 'portal' },
-};
+// ── Globals populated by loadAssets ──────────────────────────────────
 
-const IDLE_X = CANVAS_W / 2;
-const IDLE_Y = 510;
+let MAP = null;               // parsed map.json
+let TILES_IMG = null;         // background tileset
+let CHARS_IMG = null;         // character spritesheet
+let ANIM_IMG = null;          // animated-tile sheet
+let TILE = 16;                // tile size (pixels)
+let CHAR_W = 16;
+let CHAR_H = 24;
+let CANVAS_W = 0;
+let CANVAS_H = 0;
+let TILESET_COLS = 0;         // tiles per row in tiles.png
 
 // ── State ────────────────────────────────────────────────────────────
 
 const agents = new Map();
-let colorIndex = 0;
 let lastTime = 0;
+let nextCharRow = 0;
 
 // ── Agent class ──────────────────────────────────────────────────────
 
@@ -41,90 +34,148 @@ class Agent {
     constructor(id, name) {
         this.id = id;
         this.name = name;
-        this.color = AGENT_COLORS[colorIndex++ % AGENT_COLORS.length];
-        this.x = IDLE_X + (Math.random() - 0.5) * 60;
-        this.y = IDLE_Y + (Math.random() - 0.5) * 30;
-        this.targetX = this.x;
-        this.targetY = this.y;
+        this.charRow = pickCharRow(id);
+
+        const spawn = spawnPixel(id);
+        this.x = Math.round(spawn.x);
+        this.y = Math.round(spawn.y);
+        this.facing = DIR_DOWN;
         this.state = 'idle';       // idle | moving | working
         this.currentTool = null;
-        this.workPulse = 0;
+        this.dwellTimer = 0;
+
+        // Axis-aligned waypoint path. Each waypoint is {x, y}; the agent
+        // always moves along one axis at a time toward the next waypoint.
+        this.path = [];
+
+        this.walkDistance = 0;      // accumulated pixels travelled (for frame timing)
+        this.walkFrame = 0;         // 0 = idle, 1 | 2 = walk frames
+
         this.spawnAnim = 1.0;
         this.removing = false;
         this.removeAnim = 0;
 
-        // Action queue: each entry is { type: 'visit'|'idle', tool?, dwellLeft? }
-        this.queue = [];
-        this.travelTimer = 0;      // time spent moving toward current target
-        this.dwellTimer = 0;       // time spent working at current station
-        this.arrived = false;      // whether we've reached the current target
+        this.queue = [];            // [{type:'visit'|'idle', tool?}]
+
+        // Usage/context.
+        this.promptTokens = 0;
+        this.contextSize = 0;
     }
 
-    // Queue a visit to a tool station.
     enqueueVisit(toolName) {
         this.queue.push({ type: 'visit', tool: toolName });
         this._advance();
     }
 
-    // Queue a return-to-idle (collapses consecutive idles).
     enqueueIdle() {
         const last = this.queue[this.queue.length - 1];
-        // Don't stack idle commands — one pending idle is enough.
         if (last && last.type === 'idle') return;
         this.queue.push({ type: 'idle' });
         this._advance();
     }
 
-    // Start the next queued action if nothing is in progress.
+    _setPathTo(tx, ty) {
+        // Decompose (current → target) into axis-aligned segments: first
+        // horizontal, then vertical. This gives grid-style movement.
+        tx = Math.round(tx);
+        ty = Math.round(ty);
+        this.path = [];
+        if (tx !== this.x) {
+            this.path.push({ x: tx, y: this.y });
+        }
+        if (ty !== this.y) {
+            this.path.push({ x: tx, y: ty });
+        }
+        if (this.path.length === 0) {
+            this.x = tx;
+            this.y = ty;
+        }
+    }
+
     _advance() {
-        if (this.state === 'moving' || (this.state === 'working' && this.dwellTimer < MIN_DWELL_TIME)) {
-            return; // still busy with current action
+        if (this.state === 'moving' ||
+            (this.state === 'working' && this.dwellTimer < MIN_DWELL_TIME)) {
+            return;
         }
         if (this.queue.length === 0) return;
 
         const action = this.queue.shift();
-        this.arrived = false;
-        this.travelTimer = 0;
         this.dwellTimer = 0;
 
         if (action.type === 'visit') {
-            const station = STATION_DEFS[action.tool];
+            const station = MAP && MAP.stations && MAP.stations[action.tool];
             if (!station) { this._advance(); return; }
-            this.targetX = station.x + (Math.random() - 0.5) * 20;
-            this.targetY = station.y + STATION_H + 20 + (Math.random() - 0.5) * 10;
-            this.state = 'moving';
+            const tx = (station[0] + 0.5) * TILE;
+            const ty = (station[1] + 1.5) * TILE; // stand south of station tile
+            this._setPathTo(tx, ty);
             this.currentTool = action.tool;
         } else {
-            this.targetX = IDLE_X + (this.id.charCodeAt(this.id.length - 1) % 10 - 5) * 12;
-            this.targetY = IDLE_Y + (Math.random() - 0.5) * 20;
-            this.state = 'moving';
+            const idle = idlePixel();
+            const hash = this.id.charCodeAt(this.id.length - 1) || 0;
+            const tx = idle.x + ((hash % 10) - 5) * (TILE * 0.6);
+            const ty = idle.y + (Math.random() - 0.5) * TILE;
+            this._setPathTo(tx, ty);
             this.currentTool = null;
+        }
+
+        if (this.path.length > 0) {
+            this.state = 'moving';
+        } else if (this.currentTool) {
+            this.state = 'working';
+        } else {
+            this.state = 'idle';
+            this._advance();
         }
     }
 
     update(dt) {
-        const dx = this.targetX - this.x;
-        const dy = this.targetY - this.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (this.state === 'moving' && this.path.length > 0) {
+            const wp = this.path[0];
+            // Each waypoint is axis-aligned from the previous position, so
+            // exactly one of dx/dy is non-zero. Pick the non-zero axis —
+            // never blend the two.
+            const dx = wp.x - this.x;
+            const dy = wp.y - this.y;
+            const budget = WALK_SPEED * dt;
+            let stepped = 0;
 
-        this.x += dx * LERP_SPEED * dt;
-        this.y += dy * LERP_SPEED * dt;
-        this.travelTimer += dt;
-
-        // Check if arrived at target.
-        if (!this.arrived && (dist < 2 || this.travelTimer > MIN_TRAVEL_TIME + 1.0)) {
-            this.arrived = true;
-            if (this.currentTool) {
-                this.state = 'working';
-            } else {
-                this.state = 'idle';
-                this._advance();
+            if (dx !== 0) {
+                const step = Math.sign(dx) * Math.min(Math.abs(dx), budget);
+                this.x += step;
+                stepped = Math.abs(step);
+                this.facing = dx > 0 ? DIR_RIGHT : DIR_LEFT;
+            } else if (dy !== 0) {
+                const step = Math.sign(dy) * Math.min(Math.abs(dy), budget);
+                this.y += step;
+                stepped = Math.abs(step);
+                this.facing = dy > 0 ? DIR_DOWN : DIR_UP;
             }
+
+            this.walkDistance += stepped;
+            if (this.walkDistance > WALK_FRAME_DISTANCE) {
+                this.walkDistance = 0;
+                this.walkFrame = this.walkFrame === 1 ? 2 : 1;
+            }
+
+            // Waypoint reached? Snap and advance to the next leg.
+            if (Math.abs(wp.x - this.x) < 0.5 && Math.abs(wp.y - this.y) < 0.5) {
+                this.x = wp.x;
+                this.y = wp.y;
+                this.path.shift();
+                if (this.path.length === 0) {
+                    if (this.currentTool) {
+                        this.state = 'working';
+                    } else {
+                        this.state = 'idle';
+                        this._advance();
+                    }
+                }
+            }
+        } else {
+            this.walkFrame = 0;
         }
 
-        // Dwell at station then advance.
         if (this.state === 'working') {
-            this.workPulse += dt * 3;
             this.dwellTimer += dt;
             if (this.dwellTimer >= MIN_DWELL_TIME) {
                 this._advance();
@@ -134,238 +185,211 @@ class Agent {
         if (this.spawnAnim > 0) {
             this.spawnAnim = Math.max(0, this.spawnAnim - dt * 2);
         }
-
         if (this.removing) {
             this.removeAnim += dt * 2;
         }
     }
 }
 
-// ── Drawing helpers ──────────────────────────────────────────────────
+function pickCharRow(id) {
+    if (!MAP || !MAP.characters) return 0;
+    if (id === 'main' && MAP.characters.main) return MAP.characters.main.row;
+    const def = MAP.characters.default || { row: 1 };
+    nextCharRow++;
+    return def.row;
+}
 
-function drawRoom(ctx) {
-    // Floor
+function idlePixel() {
+    if (!MAP || !MAP.idle) return { x: 0, y: 0 };
+    return {
+        x: (MAP.idle[0] + 0.5) * TILE,
+        y: (MAP.idle[1] + 0.5) * TILE,
+    };
+}
+
+// Subagents emerge from the sessions_spawn portal; main starts at idle.
+function spawnPixel(id) {
+    if (id !== 'main' && MAP && MAP.stations && MAP.stations.sessions_spawn) {
+        const s = MAP.stations.sessions_spawn;
+        return {
+            x: (s[0] + 0.5) * TILE,
+            y: (s[1] + 1.5) * TILE, // one tile south of the portal, like station targets
+        };
+    }
+    const idle = idlePixel();
+    return {
+        x: idle.x + (Math.random() - 0.5) * TILE * 1.5,
+        y: idle.y + (Math.random() - 0.5) * TILE,
+    };
+}
+
+// ── Asset loading ────────────────────────────────────────────────────
+
+async function loadImage(src) {
+    const img = new Image();
+    img.src = src;
+    await img.decode();
+    return img;
+}
+
+async function loadAssets() {
+    const res = await fetch('assets/map.json');
+    MAP = await res.json();
+    TILE = MAP.tileSize || 16;
+    CHAR_W = MAP.charWidth || 16;
+    CHAR_H = MAP.charHeight || 24;
+    CANVAS_W = MAP.cols * TILE;
+    CANVAS_H = MAP.rows * TILE;
+
+    TILES_IMG = await loadImage(MAP.tileset);
+    CHARS_IMG = await loadImage(MAP.chars);
+    if (MAP.anim) {
+        ANIM_IMG = await loadImage(MAP.anim);
+    }
+    TILESET_COLS = Math.max(1, Math.floor(TILES_IMG.width / TILE));
+}
+
+// ── Drawing ──────────────────────────────────────────────────────────
+
+function drawTile(ctx, id, px, py, nowMs) {
+    if (id === 0) return;
+
+    const animDef = MAP.animated && MAP.animated[String(id)];
+    if (animDef && ANIM_IMG) {
+        const fps = animDef.fps || 4;
+        const frames = animDef.frames || [0];
+        const idx = Math.floor((nowMs / 1000) * fps) % frames.length;
+        const fi = frames[idx];
+        ctx.drawImage(ANIM_IMG, fi * TILE, 0, TILE, TILE, px, py, TILE, TILE);
+        return;
+    }
+
+    const srcIdx = id - 1; // 1-indexed tile ids
+    const sx = (srcIdx % TILESET_COLS) * TILE;
+    const sy = Math.floor(srcIdx / TILESET_COLS) * TILE;
+    ctx.drawImage(TILES_IMG, sx, sy, TILE, TILE, px, py, TILE, TILE);
+}
+
+function drawLayer(ctx, layer, nowMs) {
+    if (!layer) return;
+    for (let ty = 0; ty < layer.length; ty++) {
+        const row = layer[ty];
+        for (let tx = 0; tx < row.length; tx++) {
+            drawTile(ctx, row[tx], tx * TILE, ty * TILE, nowMs);
+        }
+    }
+}
+
+function drawMap(ctx, nowMs) {
     ctx.fillStyle = '#16213e';
     ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-
-    // Floor tiles
-    ctx.strokeStyle = 'rgba(83, 52, 131, 0.15)';
-    ctx.lineWidth = 1;
-    for (let x = 0; x < CANVAS_W; x += 40) {
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, CANVAS_H);
-        ctx.stroke();
-    }
-    for (let y = 0; y < CANVAS_H; y += 40) {
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(CANVAS_W, y);
-        ctx.stroke();
-    }
-
-    // Idle area label
-    ctx.fillStyle = 'rgba(165, 180, 252, 0.3)';
-    ctx.font = '11px Courier New';
-    ctx.textAlign = 'center';
-    ctx.fillText('~ idle area ~', IDLE_X, IDLE_Y - 30);
+    drawLayer(ctx, MAP.layers.ground, nowMs);
+    drawLayer(ctx, MAP.layers.overlay, nowMs);
 }
 
-function drawStation(ctx, name, def) {
-    const { x, y, color, icon } = def;
-
-    // Station background
-    ctx.fillStyle = color;
-    ctx.globalAlpha = 0.25;
-    ctx.fillRect(x - STATION_W / 2, y - STATION_H / 2, STATION_W, STATION_H);
-    ctx.globalAlpha = 1;
-
-    // Station border
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
-    ctx.strokeRect(x - STATION_W / 2, y - STATION_H / 2, STATION_W, STATION_H);
-
-    // Icon
-    drawIcon(ctx, icon, x, y - 4, color);
-
-    // Label
-    ctx.fillStyle = color;
-    ctx.font = 'bold 10px Courier New';
+function drawStationLabels(ctx) {
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+    ctx.lineWidth = 3;
+    ctx.font = 'bold 9px "Courier New", monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(name, x, y + STATION_H / 2 - 4);
-}
-
-function drawIcon(ctx, icon, x, y, color) {
-    ctx.fillStyle = color;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
-
-    switch (icon) {
-        case 'terminal':
-            ctx.font = 'bold 16px Courier New';
-            ctx.textAlign = 'center';
-            ctx.fillText('>_', x, y + 6);
-            break;
-        case 'book':
-            ctx.beginPath();
-            ctx.moveTo(x - 8, y - 8);
-            ctx.lineTo(x, y - 4);
-            ctx.lineTo(x + 8, y - 8);
-            ctx.lineTo(x + 8, y + 8);
-            ctx.lineTo(x, y + 4);
-            ctx.lineTo(x - 8, y + 8);
-            ctx.closePath();
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.moveTo(x, y - 4);
-            ctx.lineTo(x, y + 4);
-            ctx.stroke();
-            break;
-        case 'pencil':
-            ctx.beginPath();
-            ctx.moveTo(x - 2, y + 10);
-            ctx.lineTo(x, y + 12);
-            ctx.lineTo(x + 2, y + 10);
-            ctx.lineTo(x + 2, y - 8);
-            ctx.lineTo(x - 2, y - 8);
-            ctx.closePath();
-            ctx.fill();
-            ctx.beginPath();
-            ctx.moveTo(x - 2, y - 8);
-            ctx.lineTo(x, y - 12);
-            ctx.lineTo(x + 2, y - 8);
-            ctx.closePath();
-            ctx.fill();
-            break;
-        case 'wrench':
-            ctx.beginPath();
-            ctx.arc(x, y - 6, 6, Math.PI * 0.8, Math.PI * 2.2);
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.moveTo(x - 2, y - 2);
-            ctx.lineTo(x - 4, y + 10);
-            ctx.lineTo(x + 4, y + 10);
-            ctx.lineTo(x + 2, y - 2);
-            ctx.closePath();
-            ctx.fill();
-            break;
-        case 'search':
-            ctx.beginPath();
-            ctx.arc(x - 2, y - 2, 7, 0, Math.PI * 2);
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.moveTo(x + 3, y + 3);
-            ctx.lineTo(x + 9, y + 9);
-            ctx.stroke();
-            break;
-        case 'folder':
-            ctx.beginPath();
-            ctx.moveTo(x - 10, y - 4);
-            ctx.lineTo(x - 10, y + 8);
-            ctx.lineTo(x + 10, y + 8);
-            ctx.lineTo(x + 10, y - 4);
-            ctx.lineTo(x + 2, y - 4);
-            ctx.lineTo(x, y - 8);
-            ctx.lineTo(x - 10, y - 8);
-            ctx.closePath();
-            ctx.stroke();
-            break;
-        case 'binoculars':
-            ctx.beginPath();
-            ctx.arc(x - 5, y, 5, 0, Math.PI * 2);
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.arc(x + 5, y, 5, 0, Math.PI * 2);
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.moveTo(x - 5, y - 5);
-            ctx.lineTo(x - 5, y - 10);
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.moveTo(x + 5, y - 5);
-            ctx.lineTo(x + 5, y - 10);
-            ctx.stroke();
-            break;
-        case 'portal':
-            ctx.beginPath();
-            ctx.ellipse(x, y, 8, 12, 0, 0, Math.PI * 2);
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.ellipse(x, y, 3, 8, 0, 0, Math.PI * 2);
-            ctx.stroke();
-            break;
+    ctx.textBaseline = 'middle';
+    for (const [name, pos] of Object.entries(MAP.stations || {})) {
+        const x = (pos[0] + 0.5) * TILE;
+        const y = (pos[1] - 0.3) * TILE;
+        ctx.strokeText(name, x, y);
+        ctx.fillText(name, x, y);
     }
 }
 
 function drawAgent(ctx, agent) {
-    const r = AGENT_RADIUS;
     let alpha = 1;
-
-    // Spawn animation: grow in
     let scale = 1 - agent.spawnAnim;
     if (agent.removing) {
         alpha = Math.max(0, 1 - agent.removeAnim);
         scale = alpha;
     }
+    if (scale <= 0) return;
+
+    const sx = agent.walkFrame * CHAR_W;
+    const sy = agent.charRow * CHAR_H * 4 + agent.facing * CHAR_H;
+
+    const drawW = CHAR_W * scale;
+    const drawH = CHAR_H * scale;
+    const px = Math.round(agent.x - drawW / 2);
+    const py = Math.round(agent.y - drawH + TILE / 2); // feet near (x,y)
 
     ctx.save();
     ctx.globalAlpha = alpha;
-    ctx.translate(agent.x, agent.y);
-    ctx.scale(scale, scale);
+    ctx.imageSmoothingEnabled = false;
 
-    // Working glow
+    // Working indicator: subtle shadow oval pulsing.
     if (agent.state === 'working') {
-        const pulse = 0.3 + Math.sin(agent.workPulse) * 0.15;
+        const t = performance.now() / 200;
+        const pulse = 0.25 + Math.sin(t) * 0.1;
+        ctx.globalAlpha = alpha * pulse;
+        ctx.fillStyle = '#ffd166';
         ctx.beginPath();
-        ctx.arc(0, 0, r + 6, 0, Math.PI * 2);
-        ctx.fillStyle = agent.color;
-        ctx.globalAlpha = pulse * alpha;
+        ctx.ellipse(agent.x, agent.y + TILE / 2 - 1, CHAR_W * 0.6, 3, 0, 0, Math.PI * 2);
         ctx.fill();
         ctx.globalAlpha = alpha;
     }
 
-    // Body
-    ctx.beginPath();
-    ctx.arc(0, 0, r, 0, Math.PI * 2);
-    ctx.fillStyle = agent.color;
-    ctx.fill();
+    ctx.drawImage(CHARS_IMG, sx, sy, CHAR_W, CHAR_H, px, py, drawW, drawH);
 
-    // Border
-    ctx.strokeStyle = agent.state === 'idle' ? '#555' : '#fff';
-    ctx.lineWidth = 2;
-    ctx.stroke();
+    // Context/health bar floating above the head.
+    drawHealthBar(ctx, agent, px, py);
 
-    // Letter
-    const letter = agent.id === 'main' ? 'M' : agent.name.charAt(0).toUpperCase();
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 14px Courier New';
+    // Name label below feet.
+    ctx.fillStyle = '#a5b4fc';
+    ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+    ctx.lineWidth = 3;
+    ctx.font = 'bold 9px "Courier New", monospace';
     ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(letter, 0, 1);
-
-    // Context bar placeholder (future)
-    ctx.fillStyle = 'rgba(255,255,255,0.2)';
-    ctx.fillRect(-r, -r - 8, r * 2, 4);
-    ctx.fillStyle = '#06d6a0';
-    ctx.fillRect(-r, -r - 8, r * 2 * 0.7, 4); // 70% placeholder
+    ctx.textBaseline = 'top';
+    const labelY = py + drawH + 1;
+    ctx.strokeText(agent.name, agent.x, labelY);
+    ctx.fillText(agent.name, agent.x, labelY);
 
     ctx.restore();
+}
 
-    // Name label
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = '#a5b4fc';
-    ctx.font = '10px Courier New';
-    ctx.textAlign = 'center';
-    ctx.fillText(agent.name, agent.x, agent.y + r + 12);
-    ctx.globalAlpha = 1;
+function drawHealthBar(ctx, agent, px, py) {
+    const barW = CHAR_W + 2;
+    const barH = 3;
+    const bx = Math.round(agent.x - barW / 2);
+    const by = py - 5;
+
+    // Background frame.
+    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+    ctx.fillRect(bx - 1, by - 1, barW + 2, barH + 2);
+    ctx.fillStyle = '#222';
+    ctx.fillRect(bx, by, barW, barH);
+
+    if (agent.contextSize <= 0) return;
+
+    const ratio = Math.max(0, Math.min(1, agent.promptTokens / agent.contextSize));
+    if (ratio <= 0) return;
+
+    let color = '#06d6a0';           // green
+    if (ratio > 0.85) color = '#ef476f'; // red
+    else if (ratio > 0.6) color = '#ffd166'; // yellow
+
+    ctx.fillStyle = color;
+    ctx.fillRect(bx, by, Math.max(1, Math.floor(barW * ratio)), barH);
 }
 
 // ── Game loop ────────────────────────────────────────────────────────
 
 const canvas = document.getElementById('room');
 const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
 
 function resizeCanvas() {
+    if (!CANVAS_W || !CANVAS_H) return;
+    canvas.width = CANVAS_W;
+    canvas.height = CANVAS_H;
+
     const container = canvas.parentElement;
     const rect = container.getBoundingClientRect();
     const sidebarWidth = 280;
@@ -374,49 +398,33 @@ function resizeCanvas() {
 
     const scaleX = availW / CANVAS_W;
     const scaleY = availH / CANVAS_H;
-    const scale = Math.min(scaleX, scaleY);
+    const scale = Math.max(0.1, Math.min(scaleX, scaleY));
 
     canvas.style.width = (CANVAS_W * scale) + 'px';
     canvas.style.height = (CANVAS_H * scale) + 'px';
+    canvas.style.imageRendering = 'pixelated';
 }
-
-window.addEventListener('resize', resizeCanvas);
-resizeCanvas();
 
 function gameLoop(timestamp) {
     const dt = Math.min((timestamp - lastTime) / 1000, 0.1);
     lastTime = timestamp;
+    const nowMs = timestamp;
 
-    // Update agents
     agents.forEach(a => a.update(dt));
-
-    // Remove fully faded agents
     agents.forEach((a, id) => {
-        if (a.removing && a.removeAnim >= 1) {
-            agents.delete(id);
-        }
+        if (a.removing && a.removeAnim >= 1) agents.delete(id);
     });
 
-    // Draw
     ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
-    drawRoom(ctx);
+    drawMap(ctx, nowMs);
+    drawStationLabels(ctx);
 
-    for (const [name, def] of Object.entries(STATION_DEFS)) {
-        drawStation(ctx, name, def);
-    }
-
-    agents.forEach(a => drawAgent(ctx, a));
-
-    // Title
-    ctx.fillStyle = '#a5b4fc';
-    ctx.font = 'bold 14px Courier New';
-    ctx.textAlign = 'left';
-    ctx.fillText('Yak Agent Room', 12, 20);
+    // Depth sort so agents further down overlap those above.
+    const sorted = Array.from(agents.values()).sort((a, b) => a.y - b.y);
+    sorted.forEach(a => drawAgent(ctx, a));
 
     requestAnimationFrame(gameLoop);
 }
-
-requestAnimationFrame(gameLoop);
 
 // ── Agent management ─────────────────────────────────────────────────
 
@@ -427,9 +435,6 @@ function getOrCreateAgent(id, name) {
     return agents.get(id);
 }
 
-// Ensure the main agent always exists.
-getOrCreateAgent('main', 'orchestrator');
-
 // ── Event log ────────────────────────────────────────────────────────
 
 const logEl = document.getElementById('log');
@@ -439,16 +444,14 @@ function addLogEntry(ev) {
     const entry = document.createElement('div');
     entry.className = 'log-entry';
 
-    if (ev.type === 'agent_spawn' || ev.type === 'agent_done' || ev.type === 'agent_start' || ev.type === 'agent_end') {
+    if (ev.type === 'agent_spawn' || ev.type === 'agent_done' ||
+        ev.type === 'agent_start' || ev.type === 'agent_end') {
         entry.classList.add('spawn');
     }
-    if (ev.status === 'error') {
-        entry.classList.add('error');
-    }
+    if (ev.status === 'error') entry.classList.add('error');
 
     const time = new Date(ev.ts).toLocaleTimeString();
     let text = '';
-
     switch (ev.type) {
         case 'tool_start':
             text = `<span class="time">${time}</span> <span class="agent">${ev.agent_name}</span> -> <span class="tool">${ev.tool}</span>`;
@@ -468,19 +471,25 @@ function addLogEntry(ev) {
         case 'agent_end':
             text = `<span class="time">${time}</span> <span class="agent">${ev.agent_name}</span> completed`;
             break;
+        case 'agent_usage': {
+            const pct = ev.context_size > 0
+                ? Math.round((ev.prompt_tokens / ev.context_size) * 100)
+                : 0;
+            text = `<span class="time">${time}</span> <span class="agent">${ev.agent_name}</span> ctx ${ev.prompt_tokens}/${ev.context_size} (${pct}%)`;
+            break;
+        }
     }
+    if (!text) return;
 
     entry.innerHTML = text;
     logEl.appendChild(entry);
     logEl.scrollTop = logEl.scrollHeight;
-
-    // Keep log size bounded.
     while (logEl.children.length > 200) {
         logEl.removeChild(logEl.firstChild);
     }
 }
 
-// ── SSE connection ───────────────────────────────────────────────────
+// ── Event dispatch ───────────────────────────────────────────────────
 
 function handleEvent(ev) {
     switch (ev.type) {
@@ -494,16 +503,11 @@ function handleEvent(ev) {
             agent.enqueueIdle();
             break;
         }
-        case 'agent_spawn': {
-            // The actual subagent will appear when it makes its first tool call.
+        case 'agent_spawn':
             break;
-        }
         case 'agent_done': {
-            // Find the agent by name and start remove animation.
             agents.forEach(a => {
-                if (a.name === ev.agent_name && a.id !== 'main') {
-                    a.removing = true;
-                }
+                if (a.name === ev.agent_name && a.id !== 'main') a.removing = true;
             });
             break;
         }
@@ -514,32 +518,56 @@ function handleEvent(ev) {
         case 'agent_end': {
             const agent = getOrCreateAgent(ev.agent_id, ev.agent_name);
             agent.enqueueIdle();
-            if (ev.agent_id !== 'main') {
-                agent.removing = true;
-            }
+            if (ev.agent_id !== 'main') agent.removing = true;
+            break;
+        }
+        case 'agent_usage': {
+            const agent = getOrCreateAgent(ev.agent_id, ev.agent_name);
+            agent.promptTokens = ev.prompt_tokens || 0;
+            agent.contextSize = ev.context_size || 0;
             break;
         }
     }
     addLogEntry(ev);
 }
 
+// ── SSE connection ───────────────────────────────────────────────────
+
 function connect() {
     const source = new EventSource('/events');
-
     source.onopen = () => {
         statusEl.textContent = 'Connected';
         statusEl.className = 'connected';
     };
-
     source.onmessage = (e) => {
         const ev = JSON.parse(e.data);
         handleEvent(ev);
     };
-
     source.onerror = () => {
         statusEl.textContent = 'Disconnected - reconnecting...';
         statusEl.className = 'disconnected';
     };
 }
 
-connect();
+// ── Bootstrap ────────────────────────────────────────────────────────
+
+async function main() {
+    try {
+        await loadAssets();
+    } catch (err) {
+        console.error('asset load failed', err);
+        statusEl.textContent = 'Asset load failed';
+        statusEl.className = 'disconnected';
+        return;
+    }
+
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+
+    getOrCreateAgent('main', 'orchestrator');
+
+    requestAnimationFrame(gameLoop);
+    connect();
+}
+
+main();

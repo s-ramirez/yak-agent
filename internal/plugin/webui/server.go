@@ -8,14 +8,15 @@ import (
 	"net/http"
 )
 
-//go:embed static/*
+//go:embed static
 var staticFS embed.FS
 
 func (w *WebUI) startServer() {
 	mux := http.NewServeMux()
 
 	sub, _ := fs.Sub(staticFS, "static")
-	mux.Handle("/", http.FileServer(http.FS(sub)))
+	fileServer := http.FileServer(http.FS(sub))
+	mux.Handle("/", noCache(fileServer))
 	mux.HandleFunc("/events", w.handleSSE)
 	mux.HandleFunc("/state", w.handleState)
 
@@ -61,6 +62,18 @@ func (w *WebUI) handleSSE(rw http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// noCache wraps a handler to prevent browser caching of webui assets.
+// embed.FS reports a zero mtime, so without this browsers will happily
+// serve stale JS/CSS/map/sprite sheets across rebuilds.
+func noCache(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		rw.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		rw.Header().Set("Pragma", "no-cache")
+		rw.Header().Set("Expires", "0")
+		h.ServeHTTP(rw, r)
+	})
 }
 
 func (w *WebUI) handleState(rw http.ResponseWriter, r *http.Request) {

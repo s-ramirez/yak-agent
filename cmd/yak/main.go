@@ -187,6 +187,7 @@ func main() {
 	var afterTurnHooks []plugin.AfterTurnHook
 	var agentStartHooks []plugin.AgentStartHook
 	var agentEndHooks []plugin.AgentEndHook
+	var usageHooks []plugin.UsageHook
 	var pluginPrompts []string
 	for _, p := range plugins {
 		if allowedPlugins != nil {
@@ -226,6 +227,10 @@ func main() {
 		if aeh, ok := p.(plugin.AgentEndHook); ok {
 			agentEndHooks = append(agentEndHooks, aeh)
 			runtimePlugins[len(runtimePlugins)-1].AgentEndHook = aeh
+		}
+		if uh, ok := p.(plugin.UsageHook); ok {
+			usageHooks = append(usageHooks, uh)
+			runtimePlugins[len(runtimePlugins)-1].UsageHook = uh
 		}
 		if s := p.SystemPromptSection(); s != "" {
 			pluginPrompts = append(pluginPrompts, s)
@@ -268,6 +273,7 @@ func main() {
 		AfterTurnHooks:  afterTurnHooks,
 		AgentStartHooks: agentStartHooks,
 		AgentEndHooks:   agentEndHooks,
+		UsageHooks:      usageHooks,
 		PluginPrompts:   pluginPrompts,
 		AgentID:         "main",
 		AgentName:       "orchestrator",
@@ -299,6 +305,7 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: subagents disabled: %v\n", err)
 	} else {
+		subagentManager.SetBaseObservers(agentStartHooks, agentEndHooks, usageHooks)
 		registry = tools.NewRegistry(append(allTools,
 			subagents.NewSpawnTool(subagentManager),
 			subagents.NewControlTool(subagentManager),

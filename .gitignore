@@ -6,6 +6,10 @@
 .yak
 .env
 
+# Claude Code (machine-local)
+.claude/projects/
+.claude/settings.local.json
+
 # Go cache
 .gocache/
 
