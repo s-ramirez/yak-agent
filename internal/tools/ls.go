@@ -43,12 +43,10 @@ func (t *LsTool) Definition() ToolDefinition {
 	return lsDefinition
 }
 
-func (t *LsTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult, error) {
-	_ = ctx
-
+func (t *LsTool) Execute(_ context.Context, raw json.RawMessage) (ToolResult, error) {
 	var params LsParams
 	if err := json.Unmarshal(raw, &params); err != nil {
-		return errorResult("error: invalid JSON arguments"), nil
+		return errorResult("invalid JSON arguments"), nil
 	}
 
 	dirPath := params.Path
@@ -63,21 +61,21 @@ func (t *LsTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult, 
 
 	info, err := t.fs.Stat(dirPath)
 	if err != nil {
-		return errorResultf("error: path not found: %s", dirPath), nil
+		return errorResultf("path not found: %s", dirPath), nil
 	}
 	if !info.IsDir() {
-		return errorResultf("error: not a directory: %s", dirPath), nil
+		return errorResultf("not a directory: %s", dirPath), nil
 	}
 
 	dir, err := t.fs.Open(dirPath)
 	if err != nil {
-		return errorResultf("error: cannot read directory: %v", err), nil
+		return errorResultf("cannot read directory: %v", err), nil
 	}
 	defer dir.Close()
 
 	entries, err := dir.Readdirnames(-1)
 	if err != nil {
-		return errorResultf("error: cannot read directory: %v", err), nil
+		return errorResultf("cannot read directory: %v", err), nil
 	}
 
 	sort.Slice(entries, func(i, j int) bool {

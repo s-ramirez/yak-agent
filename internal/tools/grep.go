@@ -63,10 +63,10 @@ func (t *GrepTool) Definition() ToolDefinition {
 func (t *GrepTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult, error) {
 	var params GrepParams
 	if err := json.Unmarshal(raw, &params); err != nil {
-		return errorResult("error: invalid JSON arguments"), nil
+		return errorResult("invalid JSON arguments"), nil
 	}
 	if params.Pattern == "" {
-		return errorResult("error: pattern is required"), nil
+		return errorResult("pattern is required"), nil
 	}
 
 	searchPath := params.Path
@@ -74,7 +74,7 @@ func (t *GrepTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult
 		var err error
 		searchPath, err = os.Getwd()
 		if err != nil {
-			return errorResultf("error: failed to resolve working directory: %v", err), nil
+			return errorResultf("failed to resolve working directory: %v", err), nil
 		}
 	}
 
@@ -92,12 +92,12 @@ func (t *GrepTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult
 	}
 	re, err := regexp.Compile(patternStr)
 	if err != nil {
-		return errorResultf("error: invalid regex pattern: %v", err), nil
+		return errorResultf("invalid regex pattern: %v", err), nil
 	}
 
 	info, err := os.Stat(searchPath)
 	if err != nil {
-		return errorResultf("error: path not found: %s", searchPath), nil
+		return errorResultf("path not found: %s", searchPath), nil
 	}
 
 	var matches []string
@@ -134,8 +134,7 @@ func grepDirectory(ctx context.Context, root string, re *regexp.Regexp, globPatt
 		}
 
 		if info.IsDir() {
-			base := info.Name()
-			if base == ".git" || base == "node_modules" || base == "__pycache__" || base == ".cache" {
+			if shouldSkipDir(info.Name()) {
 				return filepath.SkipDir
 			}
 			return nil

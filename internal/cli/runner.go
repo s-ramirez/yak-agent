@@ -211,9 +211,13 @@ func (r Runner) agentLoop(
 		emptyRetries = 0
 
 		assistantMsg := resp.Choices[0].Message
+		var content any
+		if assistantMsg.Content != nil {
+			content = *assistantMsg.Content
+		}
 		*messages = append(*messages, types.Message{
 			Role:      "assistant",
-			Content:   nullableContent(assistantMsg.Content),
+			Content:   content,
 			ToolCalls: assistantMsg.ToolCalls,
 		})
 
@@ -307,31 +311,6 @@ func fallbackNoResponseMessage(messages []types.Message, hadToolCalls bool) stri
 	return "[no response after tool calls]\nRecent tool results:\n- " + strings.Join(recent, "\n- ")
 }
 
-func hasSuccessfulRecentToolResult(messages []types.Message) bool {
-	for i := len(messages) - 1; i >= 0; i-- {
-		msg := messages[i]
-		if msg.Role == "assistant" || msg.Role == "user" {
-			break
-		}
-		if msg.Role != "tool" {
-			continue
-		}
-		content, ok := msg.Content.(string)
-		if !ok {
-			continue
-		}
-		content = strings.TrimSpace(content)
-		if content == "" {
-			continue
-		}
-		if strings.HasPrefix(content, "error:") {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
 func (r Runner) reportUsage(resp *types.ChatResponse) {
 	if resp == nil || resp.Usage == nil {
 		return
@@ -364,13 +343,6 @@ func (r Runner) reportUsage(resp *types.ChatResponse) {
 			u.PromptTokens, u.CompletionTokens, u.TotalTokens)
 	}
 	_ = r.IO.Write(line)
-}
-
-func nullableContent(content *string) any {
-	if content == nil {
-		return nil
-	}
-	return *content
 }
 
 const skillPrefix = "/skill:"

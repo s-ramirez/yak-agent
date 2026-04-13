@@ -53,10 +53,10 @@ func (t *FindTool) Definition() ToolDefinition {
 func (t *FindTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult, error) {
 	var params FindParams
 	if err := json.Unmarshal(raw, &params); err != nil {
-		return errorResult("error: invalid JSON arguments"), nil
+		return errorResult("invalid JSON arguments"), nil
 	}
 	if params.Pattern == "" {
-		return errorResult("error: pattern is required"), nil
+		return errorResult("pattern is required"), nil
 	}
 
 	searchPath := params.Path
@@ -64,7 +64,7 @@ func (t *FindTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult
 		var err error
 		searchPath, err = os.Getwd()
 		if err != nil {
-			return errorResultf("error: failed to resolve working directory: %v", err), nil
+			return errorResultf("failed to resolve working directory: %v", err), nil
 		}
 	}
 
@@ -75,10 +75,10 @@ func (t *FindTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult
 
 	info, err := os.Stat(searchPath)
 	if err != nil {
-		return errorResultf("error: path not found: %s", searchPath), nil
+		return errorResultf("path not found: %s", searchPath), nil
 	}
 	if !info.IsDir() {
-		return errorResultf("error: not a directory: %s", searchPath), nil
+		return errorResultf("not a directory: %s", searchPath), nil
 	}
 
 	var results []string
@@ -93,8 +93,7 @@ func (t *FindTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult
 		}
 
 		if info.IsDir() {
-			base := info.Name()
-			if base == ".git" || base == "node_modules" || base == "__pycache__" || base == ".cache" {
+			if shouldSkipDir(info.Name()) {
 				return filepath.SkipDir
 			}
 			return nil

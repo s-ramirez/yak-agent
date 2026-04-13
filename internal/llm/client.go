@@ -40,25 +40,20 @@ func (e *ClientError) Error() string {
 
 func NewClient(baseURL, model string, opts *Options) *Client {
 	timeout := 300 * time.Second
-	if opts != nil && opts.Timeout > 0 {
-		timeout = opts.Timeout
+	var apiKey string
+	if opts != nil {
+		if opts.Timeout > 0 {
+			timeout = opts.Timeout
+		}
+		apiKey = opts.APIKey
 	}
 
 	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		model:   model,
-		apiKey:  strings.TrimSpace(optsAPIKey(opts)),
-		httpClient: &http.Client{
-			Timeout: timeout,
-		},
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		model:      model,
+		apiKey:     strings.TrimSpace(apiKey),
+		httpClient: &http.Client{Timeout: timeout},
 	}
-}
-
-func optsAPIKey(opts *Options) string {
-	if opts == nil {
-		return ""
-	}
-	return opts.APIKey
 }
 
 func (c *Client) Chat(ctx context.Context, messages []types.Message, tools []types.ChatRequestTool) (*types.ChatResponse, error) {

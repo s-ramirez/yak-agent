@@ -9,12 +9,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
-
-	"strconv"
-
-	"github.com/joho/godotenv"
 
 	"yak-go/internal/cli"
 	"yak-go/internal/llm"
@@ -49,7 +46,7 @@ func (s *stdio) ReadLine(ctx context.Context) (string, error) {
 }
 
 func main() {
-	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
+	if err := loadDotenv(".env"); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: loading .env: %v\n", err)
 	}
 
@@ -112,8 +109,9 @@ func main() {
 	// Initialize plugins.
 	var plugins []plugin.Plugin
 	if portStr := os.Getenv("YAK_WEBUI_PORT"); portStr != "" {
-		port, _ := strconv.Atoi(portStr)
-		if port == 0 {
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port <= 0 {
+			fmt.Fprintf(os.Stderr, "warning: invalid YAK_WEBUI_PORT %q, using 8420\n", portStr)
 			port = 8420
 		}
 		plugins = append(plugins, webui.New(port))
@@ -150,38 +148,18 @@ func main() {
 		tools.NewLsTool(tools.OSFS{}),
 		tools.NewFindTool(searchDelegationGuidelines...),
 	}
+	var allowedTools, allowedPlugins map[string]struct{}
 	if agentCfg != nil {
-		allowed := make(map[string]struct{}, len(agentCfg.Tools))
-		for _, name := range agentCfg.Tools {
-			allowed[name] = struct{}{}
+		allowedTools = nameSet(agentCfg.Tools)
+		if len(agentCfg.Plugins) > 0 {
+			allowedPlugins = nameSet(agentCfg.Plugins)
 		}
-		filtered := builtinTools[:0]
-		for _, t := range builtinTools {
-			if _, ok := allowed[t.Definition().Name]; ok {
-				filtered = append(filtered, t)
-			}
-		}
-		builtinTools = filtered
+		builtinTools = filterTools(builtinTools, allowedTools)
 	}
 	allTools := append([]tools.Tool(nil), builtinTools...)
 	var baseHooks []tools.ToolHook
 	baseHooks = append(baseHooks, &logHook{writer: os.Stderr})
 	var runtimePlugins []subagents.RuntimePlugin
-
-	var allowedPlugins map[string]struct{}
-	if agentCfg != nil && len(agentCfg.Plugins) > 0 {
-		allowedPlugins = make(map[string]struct{}, len(agentCfg.Plugins))
-		for _, name := range agentCfg.Plugins {
-			allowedPlugins[name] = struct{}{}
-		}
-	}
-	var allowedTools map[string]struct{}
-	if agentCfg != nil {
-		allowedTools = make(map[string]struct{}, len(agentCfg.Tools))
-		for _, name := range agentCfg.Tools {
-			allowedTools[name] = struct{}{}
-		}
-	}
 
 	// Collect after-turn hooks and prompt sections from plugins.
 	var afterTurnHooks []plugin.AfterTurnHook
@@ -197,13 +175,7 @@ func main() {
 		}
 		pluginTools := p.Tools()
 		if allowedTools != nil {
-			filtered := pluginTools[:0]
-			for _, t := range pluginTools {
-				if _, ok := allowedTools[t.Definition().Name]; ok {
-					filtered = append(filtered, t)
-				}
-			}
-			pluginTools = filtered
+			pluginTools = filterTools(pluginTools, allowedTools)
 		}
 		rp := subagents.RuntimePlugin{
 			Name:         p.Name(),
@@ -341,6 +313,62 @@ func (h *logHook) AfterToolCall(_ tools.HookContext, name string, params json.Ra
 
 func formatToolCall(name string, params json.RawMessage) string {
 	return fmt.Sprintf("%s(%s)", name, formatParams(params))
+}
+
+func nameSet(names []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		out[n] = struct{}{}
+	}
+	return out
+}
+
+func filterTools(in []tools.Tool, allowed map[string]struct{}) []tools.Tool {
+	filtered := in[:0]
+	for _, t := range in {
+		if _, ok := allowed[t.Definition().Name]; ok {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
+}
+
+func loadDotenv(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(line[len("export "):])
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		val := strings.TrimSpace(line[eq+1:])
+		if n := len(val); n >= 2 {
+			if (val[0] == '"' && val[n-1] == '"') || (val[0] == '\'' && val[n-1] == '\'') {
+				val = val[1 : n-1]
+			}
+		}
+		if _, ok := os.LookupEnv(key); ok {
+			continue
+		}
+		os.Setenv(key, val)
+	}
+	return scanner.Err()
 }
 
 func formatParams(params json.RawMessage) string {

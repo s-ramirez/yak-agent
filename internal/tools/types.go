@@ -29,13 +29,23 @@ type Tool interface {
 
 func errorResult(message string) ToolResult {
 	return ToolResult{
-		Output:  message,
+		Output:  "error: " + message,
 		IsError: true,
 	}
 }
 
 func errorResultf(format string, args ...any) ToolResult {
 	return errorResult(fmt.Sprintf(format, args...))
+}
+
+// shouldSkipDir reports whether a directory name should be skipped when walking
+// the filesystem for grep, find, etc.
+func shouldSkipDir(name string) bool {
+	switch name {
+	case ".git", "node_modules", "__pycache__", ".cache":
+		return true
+	}
+	return false
 }
 
 // HookContext carries identity information about the agent invoking a tool.

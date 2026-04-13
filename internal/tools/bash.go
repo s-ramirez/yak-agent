@@ -56,13 +56,13 @@ func (t *BashTool) Definition() ToolDefinition {
 func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult, error) {
 	var params BashParams
 	if err := json.Unmarshal(raw, &params); err != nil {
-		return errorResult("error: invalid JSON arguments"), nil
+		return errorResult("invalid JSON arguments"), nil
 	}
 	if params.Command == "" {
-		return errorResult("error: command is required"), nil
+		return errorResult("command is required"), nil
 	}
 	if params.TimeoutMS < 0 {
-		return errorResult("error: timeoutMs must be greater than or equal to 0"), nil
+		return errorResult("timeoutMs must be greater than or equal to 0"), nil
 	}
 
 	cwd := params.Cwd
@@ -70,13 +70,13 @@ func (t *BashTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult
 		var err error
 		cwd, err = os.Getwd()
 		if err != nil {
-			return errorResultf("error: failed to resolve working directory: %v", err), nil
+			return errorResultf("failed to resolve working directory: %v", err), nil
 		}
 	}
 
 	result, err := runShell(ctx, params.Command, cwd, time.Duration(params.TimeoutMS)*time.Millisecond)
 	if err != nil {
-		return errorResultf("error: failed to execute command: %v", err), nil
+		return errorResultf("failed to execute command: %v", err), nil
 	}
 
 	isError := result.Killed || result.Code != 0

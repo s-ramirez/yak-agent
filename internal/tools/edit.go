@@ -67,33 +67,31 @@ func (t *EditTool) Definition() ToolDefinition {
 	return editDefinition
 }
 
-func (t *EditTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult, error) {
-	_ = ctx
-
+func (t *EditTool) Execute(_ context.Context, raw json.RawMessage) (ToolResult, error) {
 	var params EditParams
 	if err := json.Unmarshal(raw, &params); err != nil {
-		return errorResult("error: invalid JSON arguments"), nil
+		return errorResult("invalid JSON arguments"), nil
 	}
 	if params.Path == "" {
-		return errorResult("error: path is required"), nil
+		return errorResult("path is required"), nil
 	}
 	if len(params.Edits) == 0 {
-		return errorResult("error: edits must be a non-empty array"), nil
+		return errorResult("edits must be a non-empty array"), nil
 	}
 
 	for i, edit := range params.Edits {
 		if edit.OldText == "" {
-			return errorResultf("error: edits[%d].oldText must not be empty", i), nil
+			return errorResultf("edits[%d].oldText must not be empty", i), nil
 		}
 	}
 
 	if _, err := t.fs.Stat(params.Path); err != nil {
-		return errorResultf("error: file not found or not readable: %s", params.Path), nil
+		return errorResultf("file not found or not readable: %s", params.Path), nil
 	}
 
 	rawFile, err := t.fs.ReadFile(params.Path)
 	if err != nil {
-		return errorResultf("error: failed to read file: %v", err), nil
+		return errorResultf("failed to read file: %v", err), nil
 	}
 	content := string(rawFile)
 
@@ -101,12 +99,12 @@ func (t *EditTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult
 	for i, edit := range params.Edits {
 		index := strings.Index(content, edit.OldText)
 		if index == -1 {
-			return errorResultf("error: edits[%d].oldText not found in %s", i, params.Path), nil
+			return errorResultf("edits[%d].oldText not found in %s", i, params.Path), nil
 		}
 
 		secondIndex := strings.Index(content[index+1:], edit.OldText)
 		if secondIndex != -1 {
-			return errorResultf("error: edits[%d].oldText matches multiple locations in %s. Provide more context to make it unique.", i, params.Path), nil
+			return errorResultf("edits[%d].oldText matches multiple locations in %s. Provide more context to make it unique.", i, params.Path), nil
 		}
 
 		matched = append(matched, matchedEdit{
@@ -125,7 +123,7 @@ func (t *EditTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult
 		prev := matched[i-1]
 		curr := matched[i]
 		if prev.matchIndex+prev.matchLength > curr.matchIndex {
-			return errorResultf("error: edits[%d] and edits[%d] overlap. Merge them into one edit.", prev.editIndex, curr.editIndex), nil
+			return errorResultf("edits[%d] and edits[%d] overlap. Merge them into one edit.", prev.editIndex, curr.editIndex), nil
 		}
 	}
 
@@ -136,11 +134,11 @@ func (t *EditTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult
 	}
 
 	if result == content {
-		return errorResultf("error: no changes made to %s", params.Path), nil
+		return errorResultf("no changes made to %s", params.Path), nil
 	}
 
 	if err := t.fs.WriteFile(params.Path, []byte(result), 0o644); err != nil {
-		return errorResultf("error: failed to write file: %v", err), nil
+		return errorResultf("failed to write file: %v", err), nil
 	}
 
 	count := len(matched)

@@ -42,26 +42,24 @@ func (t *WriteTool) Definition() ToolDefinition {
 	return writeDefinition
 }
 
-func (t *WriteTool) Execute(ctx context.Context, raw json.RawMessage) (ToolResult, error) {
-	_ = ctx
-
+func (t *WriteTool) Execute(_ context.Context, raw json.RawMessage) (ToolResult, error) {
 	var params WriteParams
 	if err := json.Unmarshal(raw, &params); err != nil {
-		return errorResult("error: invalid JSON arguments"), nil
+		return errorResult("invalid JSON arguments"), nil
 	}
 	if params.Path == "" {
-		return errorResult("error: path is required"), nil
+		return errorResult("path is required"), nil
 	}
 
 	dir := filepath.Dir(params.Path)
 	if dir != "." && dir != "" {
 		if err := t.fs.MkdirAll(dir, 0o755); err != nil {
-			return errorResultf("error: failed to write file: %v", err), nil
+			return errorResultf("failed to write file: %v", err), nil
 		}
 	}
 
 	if err := t.fs.WriteFile(params.Path, []byte(params.Content), 0o644); err != nil {
-		return errorResultf("error: failed to write file: %v", err), nil
+		return errorResultf("failed to write file: %v", err), nil
 	}
 
 	lineCount := 0
