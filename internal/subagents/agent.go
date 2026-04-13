@@ -44,12 +44,18 @@ func loadAgentFile(path string) (*Definition, error) {
 		return nil, fmt.Errorf("%s: tools must contain at least one tool name", path)
 	}
 
+	contextSize, err := parseContextSizeField(frontmatter["context_size"])
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+
 	return &Definition{
 		Name:        "orchestrator",
 		Description: strings.TrimSpace(frontmatter["description"]),
 		Model:       model,
 		BaseURL:     strings.TrimSpace(frontmatter["base_url"]),
 		APIKeyEnv:   strings.TrimSpace(frontmatter["api_key_env"]),
+		ContextSize: contextSize,
 		Tools:       tools,
 		Plugins:     parseList(frontmatter["plugins"]),
 		Prompt:      strings.TrimSpace(body),

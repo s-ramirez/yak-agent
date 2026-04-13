@@ -138,7 +138,7 @@ func (t *subagentsTool) Execute(ctx context.Context, raw json.RawMessage) (tools
 			return errResult(err.Error()), nil
 		}
 		return tools.ToolResult{
-			Output: fmt.Sprintf("Subagent %s finished (%s)\n%s", snapshot.RunID, snapshot.Status, coalesceResult(snapshot)),
+			Output: fmt.Sprintf("Subagent %s finished (%s) %s\n%s", snapshot.RunID, snapshot.Status, formatUsage(snapshot), coalesceResult(snapshot)),
 		}, nil
 	case "kill":
 		if strings.TrimSpace(params.RunID) == "" {
@@ -174,9 +174,26 @@ func formatRunList(runs []RunSnapshot) string {
 		if run.Task != "" {
 			line += " - " + truncate(run.Task, 80)
 		}
+		if usage := formatUsage(run); usage != "" {
+			line += " " + usage
+		}
 		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func formatUsage(snapshot RunSnapshot) string {
+	if snapshot.NumLLMCalls == 0 {
+		return ""
+	}
+	if snapshot.ContextSize > 0 {
+		remaining := snapshot.ContextSize - snapshot.LastPromptTokens
+		pct := float64(snapshot.LastPromptTokens) / float64(snapshot.ContextSize) * 100
+		return fmt.Sprintf("[calls=%d last_prompt=%d / ctx=%d (%.1f%%) left=%d cumulative=%d]",
+			snapshot.NumLLMCalls, snapshot.LastPromptTokens, snapshot.ContextSize, pct, remaining, snapshot.TotalTokens)
+	}
+	return fmt.Sprintf("[calls=%d last_prompt=%d cumulative=%d]",
+		snapshot.NumLLMCalls, snapshot.LastPromptTokens, snapshot.TotalTokens)
 }
 
 func BuildPromptSection(defs []Definition) string {

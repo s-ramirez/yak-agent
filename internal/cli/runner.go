@@ -35,6 +35,8 @@ type Runner struct {
 	AgentID         string // "main" or "subagent-N"
 	AgentName       string // human-readable name
 	Prompt          string // opening of the system prompt (from agent.md body)
+	ContextSize     int    // model context window in tokens; 0 = unknown
+	OnUsage         func(usage *types.Usage)
 }
 
 func (r Runner) Run(ctx context.Context) error {
@@ -149,6 +151,8 @@ func (r Runner) agentLoop(
 		if err != nil {
 			return "", err
 		}
+
+		r.reportUsage(resp)
 
 		toolCalls := types.GetToolCalls(resp)
 		if len(toolCalls) == 0 {
@@ -325,6 +329,31 @@ func hasSuccessfulRecentToolResult(messages []types.Message) bool {
 		return true
 	}
 	return false
+}
+
+func (r Runner) reportUsage(resp *types.ChatResponse) {
+	if resp == nil || resp.Usage == nil {
+		return
+	}
+	if r.OnUsage != nil {
+		r.OnUsage(resp.Usage)
+		return
+	}
+	if r.IO == nil {
+		return
+	}
+	u := resp.Usage
+	var line string
+	if r.ContextSize > 0 {
+		remaining := r.ContextSize - u.TotalTokens
+		pct := float64(u.TotalTokens) / float64(r.ContextSize) * 100
+		line = fmt.Sprintf("[tokens: prompt=%d completion=%d total=%d / ctx=%d (%.1f%%) left=%d]\n",
+			u.PromptTokens, u.CompletionTokens, u.TotalTokens, r.ContextSize, pct, remaining)
+	} else {
+		line = fmt.Sprintf("[tokens: prompt=%d completion=%d total=%d]\n",
+			u.PromptTokens, u.CompletionTokens, u.TotalTokens)
+	}
+	_ = r.IO.Write(line)
 }
 
 func nullableContent(content *string) any {

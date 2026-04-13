@@ -36,16 +36,21 @@ type SpawnResult struct {
 }
 
 type RunSnapshot struct {
-	RunID       string
-	Agent       string
-	Label       string
-	Task        string
-	Status      string
-	Result      string
-	Error       string
-	CreatedAt   time.Time
-	StartedAt   *time.Time
-	CompletedAt *time.Time
+	RunID            string
+	Agent            string
+	Label            string
+	Task             string
+	Status           string
+	Result           string
+	Error            string
+	CreatedAt        time.Time
+	StartedAt        *time.Time
+	CompletedAt      *time.Time
+	ContextSize      int
+	LastPromptTokens int
+	LastTotalTokens  int
+	TotalTokens      int
+	NumLLMCalls      int
 }
 
 type childRun struct {
@@ -320,6 +325,11 @@ func (m *Manager) execute(run *childRun, req SpawnRequest, def Definition) {
 		return
 	}
 
+	runID := run.snapshot.RunID
+	m.update(runID, func(snapshot *RunSnapshot) {
+		snapshot.ContextSize = def.ContextSize
+	})
+
 	runner := cli.Runner{
 		Client:          client,
 		Registry:        registry,
@@ -328,8 +338,20 @@ func (m *Manager) execute(run *childRun, req SpawnRequest, def Definition) {
 		AgentStartHooks: agentStartHooks,
 		AgentEndHooks:   agentEndHooks,
 		PluginPrompts:   nil,
-		AgentID:         run.snapshot.RunID,
+		AgentID:         runID,
 		AgentName:       def.Name,
+		ContextSize:     def.ContextSize,
+		OnUsage: func(usage *types.Usage) {
+			if usage == nil {
+				return
+			}
+			m.update(runID, func(snapshot *RunSnapshot) {
+				snapshot.NumLLMCalls++
+				snapshot.LastPromptTokens = usage.PromptTokens
+				snapshot.LastTotalTokens = usage.TotalTokens
+				snapshot.TotalTokens += usage.TotalTokens
+			})
+		},
 	}
 
 	messages := []types.Message{

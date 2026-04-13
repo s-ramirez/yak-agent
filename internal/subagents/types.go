@@ -12,6 +12,7 @@ type Definition struct {
 	Model       string
 	BaseURL     string
 	APIKeyEnv   string
+	ContextSize int
 	Tools       []string
 	Plugins     []string
 	Prompt      string

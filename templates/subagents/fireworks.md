@@ -5,6 +5,7 @@ when_to_use: Use for tasks where Fireworks-hosted models (e.g. Llama 3.1 70B) of
 model: accounts/fireworks/models/llama-v3p1-70b-instruct
 base_url: https://api.fireworks.ai/inference
 api_key_env: FIREWORKS_API_KEY
+context_size: 131072
 tools: [read, grep, ls, find]
 plugins: []
 ---

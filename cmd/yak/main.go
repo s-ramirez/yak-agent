@@ -254,8 +254,10 @@ func main() {
 	}
 
 	var agentPrompt string
+	var contextSize int
 	if agentCfg != nil {
 		agentPrompt = agentCfg.Prompt
+		contextSize = agentCfg.ContextSize
 	}
 
 	runner := cli.Runner{
@@ -270,6 +272,7 @@ func main() {
 		AgentID:         "main",
 		AgentName:       "orchestrator",
 		Prompt:          agentPrompt,
+		ContextSize:     contextSize,
 	}
 
 	subagentManager, err := subagents.NewManager(

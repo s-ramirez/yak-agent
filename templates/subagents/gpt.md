@@ -5,6 +5,7 @@ when_to_use: Use when the parent agent needs a second opinion from a hosted fron
 model: gpt-4.1
 base_url: https://api.openai.com
 api_key_env: OPENAI_API_KEY
+context_size: 1047576
 tools: [read, grep, ls, find]
 plugins: []
 ---

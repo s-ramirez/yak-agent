@@ -6,10 +6,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
-var agentNamePattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+var agentNamePattern = regexp.MustCompile(`^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$`)
 
 const (
 	maxAgentNameLen        = 64
@@ -78,7 +79,7 @@ func loadDefinitionFile(path string) (*Definition, []string, error) {
 		diagnostics = append(diagnostics, fmt.Sprintf("%s: name %q exceeds %d characters", path, name, maxAgentNameLen))
 	}
 	if !agentNamePattern.MatchString(name) {
-		diagnostics = append(diagnostics, fmt.Sprintf("%s: name %q must be lowercase alphanumeric with hyphens", path, name))
+		diagnostics = append(diagnostics, fmt.Sprintf("%s: name %q must be alphanumeric with hyphens", path, name))
 	}
 
 	description := strings.TrimSpace(frontmatter["description"])
@@ -97,6 +98,11 @@ func loadDefinitionFile(path string) (*Definition, []string, error) {
 
 	baseURL := strings.TrimSpace(frontmatter["base_url"])
 	apiKeyEnv := strings.TrimSpace(frontmatter["api_key_env"])
+
+	contextSize, ctxErr := parseContextSizeField(frontmatter["context_size"])
+	if ctxErr != nil {
+		diagnostics = append(diagnostics, fmt.Sprintf("%s: %v", path, ctxErr))
+	}
 
 	tools := parseList(frontmatter["tools"])
 	if len(tools) == 0 {
@@ -120,6 +126,7 @@ func loadDefinitionFile(path string) (*Definition, []string, error) {
 		Model:       model,
 		BaseURL:     baseURL,
 		APIKeyEnv:   apiKeyEnv,
+		ContextSize: contextSize,
 		Tools:       tools,
 		Plugins:     plugins,
 		Prompt:      prompt,
@@ -186,4 +193,16 @@ func parseList(value string) []string {
 	}
 	slices.Sort(items)
 	return items
+}
+
+func parseContextSizeField(raw string) (int, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("context_size must be a non-negative integer")
+	}
+	return n, nil
 }

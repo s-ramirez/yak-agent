@@ -1,9 +1,9 @@
 ---
 name: local
 description: Delegate to a local LM Studio model.
-when_to_use: Use for cheap, offline tasks where a local model is sufficient.
-model: qwen2.5-coder-7b-instruct
+when_to_use: Use for open-ended codebase exploration, finding files by pattern, searching for keywords, and answering questions about the repository. Include the desired thoroughness in the task when it matters.model: qwen2.5-coder-7b-instruct
 base_url: http://localhost:1234
+context_size: 32768
 tools: [read, grep, ls, find]
 plugins: []
 ---
