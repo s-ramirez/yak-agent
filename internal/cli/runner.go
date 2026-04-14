@@ -15,6 +15,7 @@ import (
 	"yak-go/internal/memory"
 	"yak-go/internal/plugin"
 	"yak-go/internal/prompt"
+	"yak-go/internal/schedule"
 	"yak-go/internal/skills"
 	"yak-go/internal/tools"
 	"yak-go/internal/types"
@@ -63,6 +64,16 @@ type Runner struct {
 	// by the LLM so compaction can use it across turns.
 	lastUsage      *types.Usage
 	lastUsageIndex int
+
+	// Scheduler, if set, feeds <scheduled_event> wakeups into the REPL loop
+	// and is consulted when building the system prompt so the model sees
+	// currently-enabled user-managed jobs at startup.
+	Scheduler *schedule.Scheduler
+}
+
+type readerMsg struct {
+	line string
+	err  error
 }
 
 func (r *Runner) Run(ctx context.Context) error {
@@ -93,43 +104,60 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	curated := r.loadCuratedMemory()
+	pluginPrompts := r.composePluginPrompts()
 	messages := []types.Message{{
 		Role:    "system",
-		Content: prompt.BuildSystemPrompt(r.Prompt, availableTools, r.Skills, env, curated, r.PluginPrompts),
+		Content: prompt.BuildSystemPrompt(r.Prompt, availableTools, r.Skills, env, curated, pluginPrompts),
 	}}
+
+	readerCh := r.startReader(ctx)
+	var eventsCh <-chan schedule.Event
+	if r.Scheduler != nil {
+		eventsCh = r.Scheduler.Events()
+	}
 
 	for {
 		if err := r.IO.Write("> "); err != nil {
 			return err
 		}
 
-		line, err := r.IO.ReadLine(ctx)
-		if err != nil {
-			if err == io.EOF {
+		var userContent string
+		select {
+		case msg, ok := <-readerCh:
+			if !ok {
 				return io.EOF
 			}
-			return err
-		}
-
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if r.OnUserInput != nil {
-			r.OnUserInput()
-		}
-
-		expanded, err := r.expandSkillCommand(trimmed)
-		if err != nil {
-			if writeErr := r.IO.Write(fmt.Sprintf("error: %v\n", err)); writeErr != nil {
-				return writeErr
+			if msg.err != nil {
+				if msg.err == io.EOF {
+					return io.EOF
+				}
+				return msg.err
 			}
-			continue
+			trimmed := strings.TrimSpace(msg.line)
+			if trimmed == "" {
+				continue
+			}
+			if r.OnUserInput != nil {
+				r.OnUserInput()
+			}
+			expanded, err := r.expandSkillCommand(trimmed)
+			if err != nil {
+				if writeErr := r.IO.Write(fmt.Sprintf("error: %v\n", err)); writeErr != nil {
+					return writeErr
+				}
+				continue
+			}
+			userContent = expanded
+		case ev := <-eventsCh:
+			_ = r.IO.Write(fmt.Sprintf("\n[scheduled event: %s fired]\n", ev.Name))
+			userContent = formatScheduledEvent(ev, time.Now())
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 
 		messages = append(messages, types.Message{
 			Role:    "user",
-			Content: expanded,
+			Content: userContent,
 		})
 
 		if _, err := r.agentLoop(ctx, &messages, toolSchemas, func(text string) error {
@@ -139,6 +167,108 @@ func (r *Runner) Run(ctx context.Context) error {
 				return writeErr
 			}
 		}
+	}
+}
+
+// startReader spawns a goroutine that pumps IO.ReadLine results onto a
+// channel. The channel is buffered at 1 so a read can complete while the main
+// loop is still processing the previous line. On error (EOF or otherwise) the
+// goroutine pushes the message and exits, closing the channel.
+func (r *Runner) startReader(ctx context.Context) <-chan readerMsg {
+	ch := make(chan readerMsg, 1)
+	go func() {
+		defer close(ch)
+		for {
+			line, err := r.IO.ReadLine(ctx)
+			select {
+			case ch <- readerMsg{line: line, err: err}:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return ch
+}
+
+// formatScheduledEvent wraps a fired job's payload in the XML envelope the
+// model sees. It is emitted as a user-role message so the agent can tell it
+// apart from direct user input.
+func formatScheduledEvent(ev schedule.Event, now time.Time) string {
+	return fmt.Sprintf("<scheduled_event name=%q fired_at=%q>\n%s\n</scheduled_event>",
+		ev.Name, now.UTC().Format(time.RFC3339), ev.Text)
+}
+
+// composePluginPrompts returns plugin sections plus a synthesized
+// <scheduled_tasks> block describing currently-enabled user jobs.
+func (r *Runner) composePluginPrompts() []string {
+	sections := append([]string(nil), r.PluginPrompts...)
+	if r.Scheduler == nil {
+		return sections
+	}
+	if s := buildScheduledTasksSection(r.Scheduler.Store().List()); s != "" {
+		sections = append(sections, s)
+	}
+	return sections
+}
+
+// buildScheduledTasksSection renders enabled jobs as an XML block for the
+// system prompt. The tool's own guidelines already cover <scheduled_event>
+// semantics, so this section is pure state — a snapshot of what is pending
+// at session start.
+func buildScheduledTasksSection(jobs []schedule.Job) string {
+	var enabled []schedule.Job
+	for _, j := range jobs {
+		if j.Enabled {
+			enabled = append(enabled, j)
+		}
+	}
+	if len(enabled) == 0 {
+		return ""
+	}
+	lines := []string{
+		"# Scheduled tasks",
+		"",
+		"These jobs are currently persisted and will fire as <scheduled_event> user messages.",
+		"Use the schedule tool to inspect, add, or remove jobs.",
+		"",
+		"<scheduled_tasks>",
+	}
+	for _, j := range enabled {
+		sched := describeSchedule(j.Schedule)
+		next := "(none)"
+		if j.NextRunAt != nil {
+			next = j.NextRunAt.UTC().Format(time.RFC3339)
+		}
+		lines = append(lines,
+			"  <task>",
+			fmt.Sprintf("    <id>%s</id>", j.ID),
+			fmt.Sprintf("    <name>%s</name>", j.Name),
+			fmt.Sprintf("    <schedule>%s</schedule>", sched),
+			fmt.Sprintf("    <next-run>%s</next-run>", next),
+			fmt.Sprintf("    <text>%s</text>", j.Text),
+			"  </task>",
+		)
+	}
+	lines = append(lines, "</scheduled_tasks>")
+	return strings.Join(lines, "\n")
+}
+
+func describeSchedule(s schedule.Schedule) string {
+	switch s.Kind {
+	case schedule.KindAt:
+		if s.At == nil {
+			return "at (unset)"
+		}
+		return "at " + s.At.UTC().Format(time.RFC3339)
+	case schedule.KindEvery:
+		return "every " + time.Duration(s.Every).String()
+	case schedule.KindCron:
+		return "cron " + s.Cron
+	default:
+		return string(s.Kind)
 	}
 }
 
@@ -520,8 +650,9 @@ func (r *Runner) DistillMemory(ctx context.Context) error {
 	}
 
 	curated := r.loadCuratedMemory()
+	pluginPrompts := r.composePluginPrompts()
 	messages := []types.Message{
-		{Role: "system", Content: prompt.BuildSystemPrompt(r.Prompt, availableTools, r.Skills, env, curated, r.PluginPrompts)},
+		{Role: "system", Content: prompt.BuildSystemPrompt(r.Prompt, availableTools, r.Skills, env, curated, pluginPrompts)},
 		{Role: "user", Content: distillInstruction},
 	}
 

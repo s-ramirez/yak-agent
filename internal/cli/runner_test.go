@@ -7,8 +7,10 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"yak-go/internal/plugin"
+	"yak-go/internal/schedule"
 	"yak-go/internal/tools"
 	"yak-go/internal/types"
 )
@@ -706,5 +708,108 @@ func TestRunnerSkipsRecoveryRetryAfterSuccessfulToolResult(t *testing.T) {
 	}
 	if !foundRecoveryPrompt {
 		t.Fatal("expected recovery prompt after empty response following successful tool output")
+	}
+}
+
+func TestFormatScheduledEventIncludesXMLEnvelope(t *testing.T) {
+	ev := schedule.Event{
+		JobID: "abc123",
+		Name:  "deploy reminder",
+		Text:  "check on the staging deploy",
+	}
+	now := time.Date(2026, 4, 13, 10, 0, 0, 0, time.UTC)
+	got := formatScheduledEvent(ev, now)
+
+	if !strings.Contains(got, `<scheduled_event name="deploy reminder" fired_at="2026-04-13T10:00:00Z">`) {
+		t.Fatalf("expected opening tag with attributes, got %q", got)
+	}
+	if !strings.Contains(got, "check on the staging deploy") {
+		t.Fatalf("expected text payload, got %q", got)
+	}
+	if !strings.HasSuffix(got, "</scheduled_event>") {
+		t.Fatalf("expected closing tag, got %q", got)
+	}
+}
+
+func TestBuildScheduledTasksSectionEmpty(t *testing.T) {
+	if got := buildScheduledTasksSection(nil); got != "" {
+		t.Fatalf("expected empty string for nil jobs, got %q", got)
+	}
+	disabled := []schedule.Job{{Name: "x", Enabled: false}}
+	if got := buildScheduledTasksSection(disabled); got != "" {
+		t.Fatalf("expected empty string when no enabled jobs, got %q", got)
+	}
+}
+
+func TestBuildScheduledTasksSectionRendersEnabledJobs(t *testing.T) {
+	at := time.Date(2026, 4, 13, 11, 0, 0, 0, time.UTC)
+	jobs := []schedule.Job{
+		{
+			ID:        "job1",
+			Name:      "standup",
+			Enabled:   true,
+			Schedule:  schedule.Schedule{Kind: schedule.KindAt, At: &at},
+			Text:      "daily standup reminder",
+			NextRunAt: &at,
+		},
+		{ID: "job2", Name: "ignored", Enabled: false},
+	}
+	got := buildScheduledTasksSection(jobs)
+
+	for _, want := range []string{
+		"<scheduled_tasks>",
+		"</scheduled_tasks>",
+		"<id>job1</id>",
+		"<name>standup</name>",
+		"at 2026-04-13T11:00:00Z",
+		"daily standup reminder",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in section, got %q", want, got)
+		}
+	}
+	if strings.Contains(got, "job2") {
+		t.Fatalf("disabled job should be omitted: %q", got)
+	}
+}
+
+func TestComposePluginPromptsIncludesScheduledTasks(t *testing.T) {
+	dir := t.TempDir()
+	store, err := schedule.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().Add(time.Hour).UTC()
+	if _, err := store.Add(schedule.Job{
+		Name:     "deploy",
+		Enabled:  true,
+		Schedule: schedule.Schedule{Kind: schedule.KindAt, At: &at},
+		Text:     "ship it",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := Runner{
+		PluginPrompts: []string{"# Plugin\nplugin body"},
+		Scheduler:     schedule.NewScheduler(store, 4),
+	}
+
+	sections := runner.composePluginPrompts()
+	if len(sections) != 2 {
+		t.Fatalf("expected 2 sections (plugin + scheduled), got %d: %+v", len(sections), sections)
+	}
+	if !strings.Contains(sections[0], "plugin body") {
+		t.Fatalf("expected first section to be plugin prompt, got %q", sections[0])
+	}
+	if !strings.Contains(sections[1], "<scheduled_tasks>") || !strings.Contains(sections[1], "deploy") {
+		t.Fatalf("expected scheduled_tasks section with job, got %q", sections[1])
+	}
+}
+
+func TestComposePluginPromptsWithoutSchedulerReturnsPluginOnly(t *testing.T) {
+	runner := Runner{PluginPrompts: []string{"only"}}
+	sections := runner.composePluginPrompts()
+	if len(sections) != 1 || sections[0] != "only" {
+		t.Fatalf("unexpected sections: %+v", sections)
 	}
 }

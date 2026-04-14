@@ -19,6 +19,7 @@ import (
 	"yak-go/internal/memory"
 	"yak-go/internal/plugin"
 	"yak-go/internal/plugin/webui"
+	"yak-go/internal/schedule"
 	"yak-go/internal/skills"
 	"yak-go/internal/subagents"
 	"yak-go/internal/tools"
@@ -143,6 +144,33 @@ func main() {
 
 	memoryStore := memory.NewStore(filepath.Join(cwd, ".yak", "memory"))
 
+	scheduleStore, err := schedule.NewStore(filepath.Join(cwd, ".yak", "schedule"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: loading schedule store: %v\n", err)
+	}
+	var scheduler *schedule.Scheduler
+	if scheduleStore != nil {
+		scheduler = schedule.NewScheduler(scheduleStore, 16)
+		if interval := os.Getenv("YAK_HEARTBEAT_INTERVAL"); interval != "" {
+			d, err := time.ParseDuration(interval)
+			if err != nil || d <= 0 {
+				fmt.Fprintf(os.Stderr, "warning: invalid YAK_HEARTBEAT_INTERVAL %q, heartbeat disabled\n", interval)
+			} else {
+				now := time.Now()
+				scheduler.Inject(schedule.Job{
+					Name:    "heartbeat",
+					Enabled: true,
+					Schedule: schedule.Schedule{
+						Kind:   schedule.KindEvery,
+						Every:  schedule.Duration(d),
+						Anchor: &now,
+					},
+					Text: "Heartbeat tick: no user input. Continue any pending work, or wait for input if there is nothing to do.",
+				})
+			}
+		}
+	}
+
 	builtinTools := []tools.Tool{
 		tools.NewReadTool(tools.OSFS{}),
 		tools.NewWriteTool(tools.OSFS{}),
@@ -155,6 +183,9 @@ func main() {
 		tools.NewMemoryWriteTool(memoryStore),
 		tools.NewMemorySearchTool(memoryStore),
 		tools.NewMemoryListTool(memoryStore),
+	}
+	if scheduleStore != nil {
+		builtinTools = append(builtinTools, tools.NewScheduleTool(scheduleStore))
 	}
 	var allowedTools, allowedPlugins map[string]struct{}
 	if agentCfg != nil {
@@ -261,6 +292,7 @@ func main() {
 		Prompt:          agentPrompt,
 		ContextSize:     contextSize,
 		MemoryStore:     memoryStore,
+		Scheduler:       scheduler,
 		OnUserInput:     func() { userActivity = true },
 		Compaction:      compaction.DefaultSettings,
 	}
@@ -300,7 +332,13 @@ func main() {
 		runner.Registry = registry
 	}
 
-	runErr := runner.Run(context.Background())
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	if scheduler != nil {
+		scheduler.Start(runCtx)
+		defer scheduler.Stop()
+	}
+	runErr := runner.Run(runCtx)
 	if userActivity {
 		if err := runner.DistillMemory(context.Background()); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: memory distill failed: %v\n", err)

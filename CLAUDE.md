@@ -34,7 +34,7 @@ Environment variables: `YAK_BASE_URL` (API endpoint), `YAK_MODEL` (model name, d
 
 ## Conventions
 
-- **No external dependencies.** The entire project uses only the Go standard library.
+- **Minimal external dependencies.** Prefer the standard library. External dependencies are allowed when they earn their keep — pick focused, small, well-maintained packages over reimplementing non-trivial logic. Avoid dependencies that pull large transitive trees, force CGo on the build, or reimplement something the stdlib already does well.
 - **Tool parameter structs** are named `<ToolName>Params` with JSON tags matching the schema field names exactly. Unmarshal with `json.Unmarshal(raw, &params)`.
 - **Tool definitions** are module-level vars (`var bashDefinition = ToolDefinition{...}`), not generated at runtime.
 - **Directory skipping**: grep and find skip `.git`, `node_modules`, `__pycache__`, `.cache` via `filepath.SkipDir`.
