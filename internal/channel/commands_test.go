@@ -1,0 +1,77 @@
+package channel
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"yak-go/internal/skills"
+)
+
+func TestCommandExpanderReturnsRawInputWhenNoPrefix(t *testing.T) {
+	e := &CommandExpander{}
+	got, err := e.Expand("hello world")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "hello world" {
+		t.Fatalf("expected unchanged input, got %q", got)
+	}
+}
+
+func TestCommandExpanderRewritesMemoryDistill(t *testing.T) {
+	e := &CommandExpander{}
+	got, err := e.Expand(MemoryDistillCommand)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != DistillInstruction {
+		t.Fatalf("expected distill instruction, got %q", got)
+	}
+}
+
+func TestCommandExpanderSkillLoadsFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "SKILL.md")
+	if err := os.WriteFile(path, []byte("skill body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	e := &CommandExpander{
+		Skills: []skills.Skill{{Name: "review", FilePath: path}},
+	}
+	got, err := e.Expand("/skill:review")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "skill body" {
+		t.Fatalf("expected skill body, got %q", got)
+	}
+}
+
+func TestCommandExpanderSkillWithArgsAppendsThem(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "SKILL.md")
+	if err := os.WriteFile(path, []byte("skill body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	e := &CommandExpander{
+		Skills: []skills.Skill{{Name: "review", FilePath: path}},
+	}
+	got, err := e.Expand("/skill:review PR 42")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(got, "skill body") || !strings.HasSuffix(got, "PR 42") {
+		t.Fatalf("expected body + args, got %q", got)
+	}
+}
+
+func TestCommandExpanderUnknownSkillReturnsError(t *testing.T) {
+	e := &CommandExpander{}
+	if _, err := e.Expand("/skill:missing"); err == nil {
+		t.Fatal("expected error for unknown skill")
+	}
+}

@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"runtime"
 	"strings"
 	"time"
 
+	"yak-go/internal/channel"
 	"yak-go/internal/compaction"
 	"yak-go/internal/llm"
 	"yak-go/internal/memory"
@@ -21,14 +21,17 @@ import (
 	"yak-go/internal/types"
 )
 
-type IO interface {
-	Write(text string) error
-	ReadLine(ctx context.Context) (string, error)
-}
-
+// Runner holds the long-lived agent configuration. It exposes three
+// entry points:
+//
+//   - HandleTurn: processes one dispatcher turn against a channel
+//     Conversation. Used by the channel dispatcher as the TurnHandler.
+//   - RunConversation: runs a fresh conversation to completion for
+//     callers that own the full message slice (subagents).
+//   - DistillMemory: a silent single-turn run that asks the model to
+//     refresh MEMORY.md at session exit.
 type Runner struct {
 	Client          llm.ChatClient
-	IO              IO
 	Registry        *tools.Registry
 	Skills          []skills.Skill
 	AfterTurnHooks  []plugin.AfterTurnHook
@@ -47,10 +50,6 @@ type Runner struct {
 	// and DistillMemory can be invoked to refresh MEMORY.md.
 	MemoryStore *memory.Store
 
-	// OnUserInput, if set, is invoked every time a non-empty user line is
-	// received in the interactive REPL. Used to gate auto-distill.
-	OnUserInput func()
-
 	// Compaction, if enabled, automatically trims old messages once the
 	// estimated context usage crosses the threshold. Only fires when
 	// ContextSize > 0.
@@ -65,36 +64,61 @@ type Runner struct {
 	lastUsage      *types.Usage
 	lastUsageIndex int
 
-	// Scheduler, if set, feeds <scheduled_event> wakeups into the REPL loop
-	// and is consulted when building the system prompt so the model sees
-	// currently-enabled user-managed jobs at startup.
+	// Scheduler, if set, is consulted when building the system prompt so
+	// the model sees currently-enabled user-managed jobs at startup. The
+	// scheduler's event stream is handled by the sched channel adapter,
+	// not by the Runner directly.
 	Scheduler *schedule.Scheduler
 }
 
-type readerMsg struct {
-	line string
-	err  error
-}
+const maxEmptyRetries = 2
+const emptyResponseRecoveryPrompt = "Your previous reply was empty. You must now produce a direct assistant response using the conversation and any tool results already returned. Do not call any more tools. Do not repeat completed work. If the task is complete, give the final answer now."
 
-func (r *Runner) Run(ctx context.Context) error {
+// HandleTurn implements channel.TurnHandler. The dispatcher serializes
+// turns per conversation, so this method has exclusive access to
+// conv.Messages for its duration.
+//
+// The first turn on a fresh conversation lazily builds and prepends the
+// system prompt so every surface (CLI, scheduled event, future webui)
+// shares the same initialization path.
+func (r *Runner) HandleTurn(ctx context.Context, conv *channel.Conversation, userContent string, reply channel.ReplyFunc) error {
 	if r.Client == nil {
 		return fmt.Errorf("client is required")
 	}
-	if r.IO == nil {
-		return fmt.Errorf("io is required")
+
+	if len(conv.Messages) == 0 {
+		conv.Messages = append(conv.Messages, types.Message{
+			Role:    "system",
+			Content: r.buildSystemPrompt(),
+		})
 	}
 
-	var availableTools []tools.Tool
+	conv.Messages = append(conv.Messages, types.Message{
+		Role:    "user",
+		Content: userContent,
+	})
+
 	var toolSchemas []types.ChatRequestTool
 	if r.Registry != nil {
-		availableTools = r.Registry.List()
 		toolSchemas = r.Registry.Schemas()
+	}
+
+	_, err := r.agentLoop(ctx, &conv.Messages, toolSchemas, reply)
+	return err
+}
+
+// buildSystemPrompt assembles the system prompt from the runner's
+// current configuration. It is invoked once per conversation, when the
+// conversation is first seen by HandleTurn.
+func (r *Runner) buildSystemPrompt() string {
+	var availableTools []tools.Tool
+	if r.Registry != nil {
+		availableTools = r.Registry.List()
 	}
 
 	now := time.Now()
 	tz, _ := now.Zone()
 	cwd, _ := os.Getwd()
-
 	env := prompt.Environment{
 		OS:        runtime.GOOS,
 		Arch:      runtime.GOARCH,
@@ -105,100 +129,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	curated := r.loadCuratedMemory()
 	pluginPrompts := r.composePluginPrompts()
-	messages := []types.Message{{
-		Role:    "system",
-		Content: prompt.BuildSystemPrompt(r.Prompt, availableTools, r.Skills, env, curated, pluginPrompts),
-	}}
-
-	readerCh := r.startReader(ctx)
-	var eventsCh <-chan schedule.Event
-	if r.Scheduler != nil {
-		eventsCh = r.Scheduler.Events()
-	}
-
-	for {
-		if err := r.IO.Write("> "); err != nil {
-			return err
-		}
-
-		var userContent string
-		select {
-		case msg, ok := <-readerCh:
-			if !ok {
-				return io.EOF
-			}
-			if msg.err != nil {
-				if msg.err == io.EOF {
-					return io.EOF
-				}
-				return msg.err
-			}
-			trimmed := strings.TrimSpace(msg.line)
-			if trimmed == "" {
-				continue
-			}
-			if r.OnUserInput != nil {
-				r.OnUserInput()
-			}
-			expanded, err := r.expandSkillCommand(trimmed)
-			if err != nil {
-				if writeErr := r.IO.Write(fmt.Sprintf("error: %v\n", err)); writeErr != nil {
-					return writeErr
-				}
-				continue
-			}
-			userContent = expanded
-		case ev := <-eventsCh:
-			_ = r.IO.Write(fmt.Sprintf("\n[scheduled event: %s fired]\n", ev.Name))
-			userContent = formatScheduledEvent(ev, time.Now())
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-
-		messages = append(messages, types.Message{
-			Role:    "user",
-			Content: userContent,
-		})
-
-		if _, err := r.agentLoop(ctx, &messages, toolSchemas, func(text string) error {
-			return r.IO.Write(text + "\n")
-		}); err != nil {
-			if writeErr := r.IO.Write(fmt.Sprintf("error: %v\n", err)); writeErr != nil {
-				return writeErr
-			}
-		}
-	}
-}
-
-// startReader spawns a goroutine that pumps IO.ReadLine results onto a
-// channel. The channel is buffered at 1 so a read can complete while the main
-// loop is still processing the previous line. On error (EOF or otherwise) the
-// goroutine pushes the message and exits, closing the channel.
-func (r *Runner) startReader(ctx context.Context) <-chan readerMsg {
-	ch := make(chan readerMsg, 1)
-	go func() {
-		defer close(ch)
-		for {
-			line, err := r.IO.ReadLine(ctx)
-			select {
-			case ch <- readerMsg{line: line, err: err}:
-			case <-ctx.Done():
-				return
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-	return ch
-}
-
-// formatScheduledEvent wraps a fired job's payload in the XML envelope the
-// model sees. It is emitted as a user-role message so the agent can tell it
-// apart from direct user input.
-func formatScheduledEvent(ev schedule.Event, now time.Time) string {
-	return fmt.Sprintf("<scheduled_event name=%q fired_at=%q>\n%s\n</scheduled_event>",
-		ev.Name, now.UTC().Format(time.RFC3339), ev.Text)
+	return prompt.BuildSystemPrompt(r.Prompt, availableTools, r.Skills, env, curated, pluginPrompts)
 }
 
 // composePluginPrompts returns plugin sections plus a synthesized
@@ -272,9 +203,6 @@ func describeSchedule(s schedule.Schedule) string {
 	}
 }
 
-const maxEmptyRetries = 2
-const emptyResponseRecoveryPrompt = "Your previous reply was empty. You must now produce a direct assistant response using the conversation and any tool results already returned. Do not call any more tools. Do not repeat completed work. If the task is complete, give the final answer now."
-
 func (r *Runner) RunConversation(
 	ctx context.Context,
 	messages []types.Message,
@@ -284,11 +212,15 @@ func (r *Runner) RunConversation(
 	return finalText, messages, err
 }
 
+// agentLoop is the core LLM + tool-dispatch cycle. emit, if non-nil,
+// receives user-visible output: the final assistant text, usage
+// summaries, and compaction status lines. Pass nil for silent runs
+// (subagents, DistillMemory).
 func (r *Runner) agentLoop(
 	ctx context.Context,
 	messages *[]types.Message,
 	toolSchemas []types.ChatRequestTool,
-	onFinalText func(string) error,
+	emit channel.ReplyFunc,
 ) (finalText string, err error) {
 	lifecycleCtx := plugin.AgentLifecycleContext{
 		AgentID:   r.AgentID,
@@ -310,7 +242,7 @@ func (r *Runner) agentLoop(
 	}
 
 	for {
-		if r.maybeCompact(ctx, messages) {
+		if r.maybeCompact(ctx, messages, emit) {
 			hadToolCalls = false
 			emptyRetries = 0
 		}
@@ -320,7 +252,7 @@ func (r *Runner) agentLoop(
 			return "", err
 		}
 
-		r.reportUsage(resp)
+		r.reportUsage(resp, emit)
 		if resp.Usage != nil {
 			r.lastUsage = resp.Usage
 			r.lastUsageIndex = len(*messages) - 1
@@ -347,8 +279,8 @@ func (r *Runner) agentLoop(
 				text = fallbackNoResponseMessage(*messages, hadToolCalls)
 			}
 
-			if onFinalText != nil {
-				if err := onFinalText(text); err != nil {
+			if emit != nil {
+				if err := emit(text + "\n"); err != nil {
 					return "", err
 				}
 			}
@@ -456,7 +388,7 @@ func (r *Runner) agentLoop(
 // maybeCompact checks the budget and, if triggered, replaces *messages
 // with a compacted version in place. Returns true when compaction ran
 // successfully so callers can reset per-turn state.
-func (r *Runner) maybeCompact(ctx context.Context, messages *[]types.Message) bool {
+func (r *Runner) maybeCompact(ctx context.Context, messages *[]types.Message, emit channel.ReplyFunc) bool {
 	if !r.Compaction.Enabled || r.ContextSize <= 0 {
 		return false
 	}
@@ -465,14 +397,14 @@ func (r *Runner) maybeCompact(ctx context.Context, messages *[]types.Message) bo
 		return false
 	}
 
-	if r.IO != nil {
-		_ = r.IO.Write(compaction.FormatTriggerLine(tokens, r.ContextSize, r.Compaction) + "\n")
+	if emit != nil {
+		_ = emit(compaction.FormatTriggerLine(tokens, r.ContextSize, r.Compaction) + "\n")
 	}
 
 	res, err := compaction.Compact(ctx, r.Client, *messages, r.lastSummary, r.Compaction, tokens)
 	if err != nil {
-		if r.IO != nil {
-			_ = r.IO.Write(fmt.Sprintf("[compaction failed: %v]\n", err))
+		if emit != nil {
+			_ = emit(fmt.Sprintf("[compaction failed: %v]\n", err))
 		}
 		return false
 	}
@@ -485,9 +417,9 @@ func (r *Runner) maybeCompact(ctx context.Context, messages *[]types.Message) bo
 	r.lastUsage = nil
 	r.lastUsageIndex = -1
 
-	if r.IO != nil {
+	if emit != nil {
 		after := compaction.EstimateContextTokens(*messages, nil, -1)
-		_ = r.IO.Write(fmt.Sprintf("[compacted: %d → %d tokens]\n", tokens, after))
+		_ = emit(fmt.Sprintf("[compacted: %d → %d tokens]\n", tokens, after))
 	}
 	return true
 }
@@ -521,7 +453,7 @@ func fallbackNoResponseMessage(messages []types.Message, hadToolCalls bool) stri
 	return "[no response after tool calls]\nRecent tool results:\n- " + strings.Join(recent, "\n- ")
 }
 
-func (r *Runner) reportUsage(resp *types.ChatResponse) {
+func (r *Runner) reportUsage(resp *types.ChatResponse, emit channel.ReplyFunc) {
 	if resp == nil || resp.Usage == nil {
 		return
 	}
@@ -538,7 +470,7 @@ func (r *Runner) reportUsage(resp *types.ChatResponse) {
 		r.OnUsage(resp.Usage)
 		return
 	}
-	if r.IO == nil {
+	if emit == nil {
 		return
 	}
 	u := resp.Usage
@@ -552,58 +484,7 @@ func (r *Runner) reportUsage(resp *types.ChatResponse) {
 		line = fmt.Sprintf("[tokens: prompt=%d completion=%d total=%d]\n",
 			u.PromptTokens, u.CompletionTokens, u.TotalTokens)
 	}
-	_ = r.IO.Write(line)
-}
-
-const skillPrefix = "/skill:"
-const memoryDistillCommand = "/memory:distill"
-
-// distillInstruction is the fixed prompt used by both the manual
-// /memory:distill slash command and the auto-distill flow on session exit.
-const distillInstruction = `Review this session and refresh long-term memory.
-
-1. Call memory_read with path="MEMORY.md" to see current curated memory. A missing file is fine.
-2. Call memory_list with dir="sessions" to see available session notes. Read recent ones that look relevant with memory_read.
-3. Decide whether this session produced anything worth preserving long-term: user preferences, active priorities, hard-won lessons, durable facts. Skip anything already in the agent config, skills, or obvious from project files.
-4. If there is something worth updating, call memory_write with path="MEMORY.md", mode="overwrite", and content containing a refreshed MEMORY.md (aim for under 3000 characters, plain Markdown, no frontmatter required). Then reply with one short sentence summarizing what changed.
-5. If nothing needs updating, reply with exactly: NO_UPDATE
-
-Do not ask the user questions — this is a background review.`
-
-// expandSkillCommand checks if input starts with /skill:<name> or
-// /memory:distill and expands it to an appropriate prompt. If the input is
-// not a recognized command, it is returned unchanged.
-func (r *Runner) expandSkillCommand(input string) (string, error) {
-	if input == memoryDistillCommand {
-		return distillInstruction, nil
-	}
-	if !strings.HasPrefix(input, skillPrefix) {
-		return input, nil
-	}
-
-	rest := input[len(skillPrefix):]
-	name := rest
-	args := ""
-	if idx := strings.IndexByte(rest, ' '); idx >= 0 {
-		name = rest[:idx]
-		args = strings.TrimSpace(rest[idx+1:])
-	}
-
-	for _, s := range r.Skills {
-		if s.Name == name {
-			content, err := os.ReadFile(s.FilePath)
-			if err != nil {
-				return "", fmt.Errorf("reading skill %q: %w", name, err)
-			}
-			result := string(content)
-			if args != "" {
-				result += "\n\n" + args
-			}
-			return result, nil
-		}
-	}
-
-	return "", fmt.Errorf("unknown skill %q", name)
+	_ = emit(line)
 }
 
 // loadCuratedMemory reads MEMORY.md if a store is configured. Returns "" on
@@ -619,10 +500,11 @@ func (r *Runner) loadCuratedMemory() string {
 	return curated
 }
 
-// DistillMemory runs a single non-interactive agent turn that asks the model
-// to refresh MEMORY.md based on this session's work. Only the top-level
-// runner (AgentID == "main") executes; subagents are no-ops. Intended to be
-// called from the main entry point after the interactive REPL exits.
+// DistillMemory runs a single non-interactive agent turn that asks the
+// model to refresh MEMORY.md based on this session's work. Only the
+// top-level runner (AgentID == "main") executes; subagents are no-ops.
+// Intended to be called from the main entry point after the channel
+// dispatcher exits.
 func (r *Runner) DistillMemory(ctx context.Context) error {
 	if r.MemoryStore == nil || r.AgentID != "main" {
 		return nil
@@ -631,29 +513,14 @@ func (r *Runner) DistillMemory(ctx context.Context) error {
 		return fmt.Errorf("client is required")
 	}
 
-	var availableTools []tools.Tool
 	var toolSchemas []types.ChatRequestTool
 	if r.Registry != nil {
-		availableTools = r.Registry.List()
 		toolSchemas = r.Registry.Schemas()
 	}
 
-	now := time.Now()
-	tz, _ := now.Zone()
-	cwd, _ := os.Getwd()
-	env := prompt.Environment{
-		OS:        runtime.GOOS,
-		Arch:      runtime.GOARCH,
-		Workspace: cwd,
-		Timezone:  tz,
-		Time:      now.Format(time.RFC3339),
-	}
-
-	curated := r.loadCuratedMemory()
-	pluginPrompts := r.composePluginPrompts()
 	messages := []types.Message{
-		{Role: "system", Content: prompt.BuildSystemPrompt(r.Prompt, availableTools, r.Skills, env, curated, pluginPrompts)},
-		{Role: "user", Content: distillInstruction},
+		{Role: "system", Content: r.buildSystemPrompt()},
+		{Role: "user", Content: channel.DistillInstruction},
 	}
 
 	_, err := r.agentLoop(ctx, &messages, toolSchemas, nil)

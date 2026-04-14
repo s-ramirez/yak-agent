@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"yak-go/internal/channel"
+	clichannel "yak-go/internal/channel/cli"
+	"yak-go/internal/channel/sched"
 	"yak-go/internal/cli"
 	"yak-go/internal/compaction"
 	"yak-go/internal/llm"
@@ -24,29 +28,6 @@ import (
 	"yak-go/internal/subagents"
 	"yak-go/internal/tools"
 )
-
-type stdio struct {
-	reader *bufio.Reader
-	writer io.Writer
-}
-
-func (s *stdio) Write(text string) error {
-	_, err := io.WriteString(s.writer, text)
-	return err
-}
-
-func (s *stdio) ReadLine(ctx context.Context) (string, error) {
-	_ = ctx
-
-	line, err := s.reader.ReadString('\n')
-	if err != nil {
-		if err == io.EOF && len(line) > 0 {
-			return strings.TrimRight(line, "\r\n"), nil
-		}
-		return "", err
-	}
-	return strings.TrimRight(line, "\r\n"), nil
-}
 
 func main() {
 	if err := loadDotenv(".env"); err != nil {
@@ -279,7 +260,6 @@ func main() {
 	var userActivity bool
 	runner := cli.Runner{
 		Client:          chatClient,
-		IO:              &stdio{reader: bufio.NewReader(os.Stdin), writer: os.Stdout},
 		Registry:        registry,
 		Skills:          loadedSkills,
 		AfterTurnHooks:  afterTurnHooks,
@@ -293,7 +273,6 @@ func main() {
 		ContextSize:     contextSize,
 		MemoryStore:     memoryStore,
 		Scheduler:       scheduler,
-		OnUserInput:     func() { userActivity = true },
 		Compaction:      compaction.DefaultSettings,
 	}
 
@@ -338,13 +317,34 @@ func main() {
 		scheduler.Start(runCtx)
 		defer scheduler.Stop()
 	}
-	runErr := runner.Run(runCtx)
+
+	channels := channel.NewRegistry()
+	channels.Register(clichannel.NewStdio(os.Stdin, os.Stdout))
+	if scheduler != nil {
+		channels.Register(&sched.Channel{
+			Scheduler: scheduler,
+			Target:    channel.Key{Channel: clichannel.Name, Thread: clichannel.DefaultThread},
+		})
+	}
+
+	dispatcher := &channel.Dispatcher{
+		Channels:    channels,
+		Store:       channel.NewStore(),
+		Commands:    &channel.CommandExpander{Skills: loadedSkills},
+		Handler:     &runner,
+		OnUserInput: func() { userActivity = true },
+		Logger: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "[dispatcher] "+format+"\n", args...)
+		},
+	}
+
+	runErr := dispatcher.Run(runCtx)
 	if userActivity {
 		if err := runner.DistillMemory(context.Background()); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: memory distill failed: %v\n", err)
 		}
 	}
-	if runErr != nil && runErr != io.EOF {
+	if runErr != nil && !errors.Is(runErr, io.EOF) && !errors.Is(runErr, context.Canceled) {
 		_, _ = fmt.Fprintf(os.Stderr, "error: %v\n", runErr)
 		os.Exit(1)
 	}

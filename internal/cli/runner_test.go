@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"strings"
 	"testing"
 	"time"
 
+	"yak-go/internal/channel"
 	"yak-go/internal/plugin"
 	"yak-go/internal/schedule"
 	"yak-go/internal/tools"
@@ -49,31 +49,6 @@ func (h *blockingHook) BeforeToolCall(_ tools.HookContext, name string, _ json.R
 }
 
 func (h blockingHook) AfterToolCall(_ tools.HookContext, _ string, _ json.RawMessage, _ tools.ToolResult, _ error) {
-}
-
-type fakeIO struct {
-	lines   []string
-	writes  []string
-	readErr error
-	index   int
-}
-
-func (f *fakeIO) Write(text string) error {
-	f.writes = append(f.writes, text)
-	return nil
-}
-
-func (f *fakeIO) ReadLine(ctx context.Context) (string, error) {
-	_ = ctx
-	if f.index >= len(f.lines) {
-		if f.readErr != nil {
-			return "", f.readErr
-		}
-		return "", io.EOF
-	}
-	line := f.lines[f.index]
-	f.index++
-	return line, nil
 }
 
 type stubClient struct {
@@ -128,8 +103,17 @@ func strPtr(value string) *string {
 	return &value
 }
 
-func TestRunnerRunPrintsAssistantText(t *testing.T) {
-	ioStub := &fakeIO{lines: []string{"hello"}}
+// captureReply returns a ReplyFunc that appends each reply to *out and
+// never errors. Used by tests that care about the exact text sent back
+// through the dispatcher reply path.
+func captureReply(out *[]string) channel.ReplyFunc {
+	return func(text string) error {
+		*out = append(*out, text)
+		return nil
+	}
+}
+
+func TestRunnerHandleTurnEmitsFinalText(t *testing.T) {
 	client := &stubClient{
 		responses: []*types.ChatResponse{
 			{
@@ -145,18 +129,112 @@ func TestRunnerRunPrintsAssistantText(t *testing.T) {
 
 	runner := Runner{
 		Client:   client,
-		IO:       ioStub,
 		Registry: tools.NewRegistry(),
 	}
 
-	err := runner.Run(context.Background())
-	if !errors.Is(err, io.EOF) {
-		t.Fatalf("expected EOF, got %v", err)
+	conv := &channel.Conversation{Key: channel.Key{Channel: "cli", Thread: "default"}}
+	var replies []string
+	if err := runner.HandleTurn(context.Background(), conv, "hello", captureReply(&replies)); err != nil {
+		t.Fatalf("HandleTurn returned error: %v", err)
+	}
+	if len(replies) != 1 || replies[0] != "hi there\n" {
+		t.Fatalf("unexpected replies: %#v", replies)
+	}
+	if len(conv.Messages) < 2 {
+		t.Fatalf("expected system prompt + user + assistant in conv, got %d messages", len(conv.Messages))
+	}
+	if conv.Messages[0].Role != "system" {
+		t.Fatalf("expected system prompt first, got %q", conv.Messages[0].Role)
+	}
+}
+
+func TestRunnerHandleTurnExecutesToolCalls(t *testing.T) {
+	tempDir := t.TempDir()
+	targetPath := tempDir + "/example.txt"
+	args, _ := json.Marshal(map[string]any{
+		"path":    targetPath,
+		"content": "hello\nworld",
+	})
+
+	client := &stubClient{
+		responses: []*types.ChatResponse{
+			{
+				Choices: []types.Choice{{
+					Message: types.ResponseMessage{
+						Role:    "assistant",
+						Content: strPtr(""),
+						ToolCalls: []types.ToolCall{
+							{
+								ID:   "call-1",
+								Type: "function",
+								Function: types.ToolCallFunction{
+									Name:      "write",
+									Arguments: string(args),
+								},
+							},
+						},
+					},
+				}},
+			},
+			{
+				Choices: []types.Choice{{
+					Message: types.ResponseMessage{
+						Role:    "assistant",
+						Content: strPtr("done"),
+					},
+				}},
+			},
+		},
 	}
 
-	got := strings.Join(ioStub.writes, "")
-	if got != "> hi there\n> " {
-		t.Fatalf("unexpected output: %q", got)
+	runner := Runner{
+		Client: client,
+		Registry: tools.NewRegistry(
+			tools.NewWriteTool(tools.OSFS{}),
+		),
+	}
+
+	conv := &channel.Conversation{Key: channel.Key{Channel: "cli", Thread: "default"}}
+	var replies []string
+	if err := runner.HandleTurn(context.Background(), conv, "write the file", captureReply(&replies)); err != nil {
+		t.Fatalf("HandleTurn returned error: %v", err)
+	}
+	if len(replies) != 1 || replies[0] != "done\n" {
+		t.Fatalf("unexpected replies: %#v", replies)
+	}
+}
+
+func TestRunnerHandleTurnReusesExistingSystemPrompt(t *testing.T) {
+	client := &stubClient{
+		responses: []*types.ChatResponse{
+			{Choices: []types.Choice{{Message: types.ResponseMessage{Role: "assistant", Content: strPtr("first")}}}},
+			{Choices: []types.Choice{{Message: types.ResponseMessage{Role: "assistant", Content: strPtr("second")}}}},
+		},
+	}
+
+	runner := Runner{Client: client, Registry: tools.NewRegistry()}
+	conv := &channel.Conversation{Key: channel.Key{Channel: "cli", Thread: "default"}}
+	var replies []string
+	reply := captureReply(&replies)
+
+	if err := runner.HandleTurn(context.Background(), conv, "one", reply); err != nil {
+		t.Fatalf("first HandleTurn error: %v", err)
+	}
+	systemContent := conv.Messages[0].Content
+	if err := runner.HandleTurn(context.Background(), conv, "two", reply); err != nil {
+		t.Fatalf("second HandleTurn error: %v", err)
+	}
+	systemCount := 0
+	for _, m := range conv.Messages {
+		if m.Role == "system" {
+			systemCount++
+		}
+	}
+	if systemCount != 1 {
+		t.Fatalf("expected 1 system message across turns, got %d", systemCount)
+	}
+	if conv.Messages[0].Content != systemContent {
+		t.Fatalf("system prompt was rebuilt between turns")
 	}
 }
 
@@ -253,108 +331,6 @@ func TestRunnerRunConversationFiresAgentLifecycleHooksOnError(t *testing.T) {
 	}
 	if recorder.ends[0].err == nil || recorder.ends[0].err.Error() != "boom" {
 		t.Fatalf("expected boom error in end hook, got %v", recorder.ends[0].err)
-	}
-}
-
-func TestRunnerRunExecutesToolCalls(t *testing.T) {
-	ioStub := &fakeIO{lines: []string{"read file"}}
-	args, _ := json.Marshal(map[string]any{
-		"path":    "/tmp/example.txt",
-		"content": "hello\nworld",
-	})
-
-	client := &stubClient{
-		responses: []*types.ChatResponse{
-			{
-				Choices: []types.Choice{{
-					Message: types.ResponseMessage{
-						Role:    "assistant",
-						Content: strPtr(""),
-						ToolCalls: []types.ToolCall{
-							{
-								ID:   "call-1",
-								Type: "function",
-								Function: types.ToolCallFunction{
-									Name:      "write",
-									Arguments: string(args),
-								},
-							},
-						},
-					},
-				}},
-			},
-			{
-				Choices: []types.Choice{{
-					Message: types.ResponseMessage{
-						Role:    "assistant",
-						Content: strPtr("done"),
-					},
-				}},
-			},
-		},
-	}
-
-	runner := Runner{
-		Client: client,
-		IO:     ioStub,
-		Registry: tools.NewRegistry(
-			tools.NewWriteTool(tools.OSFS{}),
-		),
-	}
-
-	tempDir := t.TempDir()
-	targetPath := tempDir + "/example.txt"
-	args, _ = json.Marshal(map[string]any{
-		"path":    targetPath,
-		"content": "hello\nworld",
-	})
-	client.responses[0].Choices[0].Message.ToolCalls[0].Function.Arguments = string(args)
-
-	err := runner.Run(context.Background())
-	if !errors.Is(err, io.EOF) {
-		t.Fatalf("expected EOF, got %v", err)
-	}
-
-	got := strings.Join(ioStub.writes, "")
-	if got != "> done\n> " {
-		t.Fatalf("unexpected output: %q", got)
-	}
-}
-
-func TestRunnerRunPrintsClientErrorsAndContinues(t *testing.T) {
-	ioStub := &fakeIO{lines: []string{"first", "second"}}
-	client := &stubClient{
-		errors: []error{
-			errors.New("boom"),
-			nil,
-		},
-		responses: []*types.ChatResponse{
-			nil,
-			{
-				Choices: []types.Choice{{
-					Message: types.ResponseMessage{
-						Role:    "assistant",
-						Content: strPtr("second response"),
-					},
-				}},
-			},
-		},
-	}
-
-	runner := Runner{
-		Client:   client,
-		IO:       ioStub,
-		Registry: tools.NewRegistry(),
-	}
-
-	err := runner.Run(context.Background())
-	if !errors.Is(err, io.EOF) {
-		t.Fatalf("expected EOF, got %v", err)
-	}
-
-	got := strings.Join(ioStub.writes, "")
-	if got != "> error: boom\n> second response\n> " {
-		t.Fatalf("unexpected output: %q", got)
 	}
 }
 
@@ -708,26 +684,6 @@ func TestRunnerSkipsRecoveryRetryAfterSuccessfulToolResult(t *testing.T) {
 	}
 	if !foundRecoveryPrompt {
 		t.Fatal("expected recovery prompt after empty response following successful tool output")
-	}
-}
-
-func TestFormatScheduledEventIncludesXMLEnvelope(t *testing.T) {
-	ev := schedule.Event{
-		JobID: "abc123",
-		Name:  "deploy reminder",
-		Text:  "check on the staging deploy",
-	}
-	now := time.Date(2026, 4, 13, 10, 0, 0, 0, time.UTC)
-	got := formatScheduledEvent(ev, now)
-
-	if !strings.Contains(got, `<scheduled_event name="deploy reminder" fired_at="2026-04-13T10:00:00Z">`) {
-		t.Fatalf("expected opening tag with attributes, got %q", got)
-	}
-	if !strings.Contains(got, "check on the staging deploy") {
-		t.Fatalf("expected text payload, got %q", got)
-	}
-	if !strings.HasSuffix(got, "</scheduled_event>") {
-		t.Fatalf("expected closing tag, got %q", got)
 	}
 }
 
