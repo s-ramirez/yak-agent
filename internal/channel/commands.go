@@ -11,8 +11,28 @@ import (
 const (
 	SkillPrefix          = "/skill:"
 	MemoryDistillCommand = "/memory:distill"
-	NewConversationCommand = "/new"
 )
+
+// ParseResetCommand reports whether input begins with /new or /reset
+// (followed by whitespace or end-of-input) and returns any trailing
+// body. The tail has surrounding whitespace trimmed. A trailing body
+// means "clear the conversation, then treat this as the first user
+// message of the fresh session".
+func ParseResetCommand(input string) (matched bool, tail string) {
+	for _, cmd := range []string{"/new", "/reset"} {
+		if input == cmd {
+			return true, ""
+		}
+		rest, ok := strings.CutPrefix(input, cmd)
+		if !ok {
+			continue
+		}
+		if rest[0] == ' ' || rest[0] == '\t' || rest[0] == '\n' {
+			return true, strings.TrimSpace(rest)
+		}
+	}
+	return false, ""
+}
 
 // DistillInstruction is the fixed prompt used by both the manual
 // /memory:distill slash command and the auto-distill flow at session

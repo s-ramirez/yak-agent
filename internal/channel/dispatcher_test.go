@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"yak-go/internal/types"
 )
 
 // fakeChannel is a test double that lets tests drive inbound messages
@@ -269,6 +271,96 @@ type handlerFunc func(ctx context.Context, conv *Conversation, content string, r
 
 func (f handlerFunc) HandleTurn(ctx context.Context, conv *Conversation, content string, reply ReplyFunc) error {
 	return f(ctx, conv, content, reply)
+}
+
+func TestDispatcherResetCommandClearsAndDispatchesTail(t *testing.T) {
+	ch := newFakeChannel("cli",
+		Inbound{Channel: "cli", Thread: "t", Content: "/new hello again", Kind: KindUser},
+	)
+	reg := NewRegistry()
+	reg.Register(ch)
+
+	store := NewStore()
+	preExisting := store.Get(Key{Channel: "cli", Thread: "t"})
+	preExisting.Messages = append(preExisting.Messages,
+		types.Message{Role: "user", Content: "old"},
+		types.Message{Role: "assistant", Content: "older"},
+	)
+
+	var received string
+	var mu sync.Mutex
+	d := &Dispatcher{
+		Channels: reg,
+		Store:    store,
+		Handler: handlerFunc(func(ctx context.Context, conv *Conversation, content string, reply ReplyFunc) error {
+			mu.Lock()
+			received = content
+			mu.Unlock()
+			return reply("ok\n")
+		}),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		_ = d.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-ch.ready:
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for reply")
+	}
+	cancel()
+	<-done
+
+	mu.Lock()
+	got := received
+	mu.Unlock()
+	if got != "hello again" {
+		t.Fatalf("expected tail dispatched as content, got %q", got)
+	}
+	if len(preExisting.Messages) != 0 {
+		t.Fatalf("expected conversation cleared, got %d messages", len(preExisting.Messages))
+	}
+}
+
+func TestDispatcherBareResetCommandAcknowledges(t *testing.T) {
+	ch := newFakeChannel("cli",
+		Inbound{Channel: "cli", Thread: "t", Content: "/reset", Kind: KindUser},
+	)
+	reg := NewRegistry()
+	reg.Register(ch)
+
+	handler := &echoHandler{}
+	d := &Dispatcher{Channels: reg, Store: NewStore(), Handler: handler}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		_ = d.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-ch.ready:
+	case <-ctx.Done():
+		t.Fatal("timeout")
+	}
+	cancel()
+	<-done
+
+	if handler.turnCount() != 0 {
+		t.Fatalf("expected handler not invoked for bare /reset, got %d turns", handler.turnCount())
+	}
+	sent := ch.sends()
+	if len(sent) != 1 || sent[0].Content != "New conversation started.\n" {
+		t.Fatalf("unexpected reply: %+v", sent)
+	}
 }
 
 func TestDispatcherHandlerErrorEmittedAsReply(t *testing.T) {

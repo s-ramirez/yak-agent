@@ -75,3 +75,27 @@ func TestCommandExpanderUnknownSkillReturnsError(t *testing.T) {
 		t.Fatal("expected error for unknown skill")
 	}
 }
+
+func TestParseResetCommand(t *testing.T) {
+	cases := []struct {
+		in      string
+		matched bool
+		tail    string
+	}{
+		{"/new", true, ""},
+		{"/reset", true, ""},
+		{"/new do a thing", true, "do a thing"},
+		{"/reset  with   spaces", true, "with   spaces"},
+		{"/new\nmulti", true, "multi"},
+		{"/newish", false, ""},
+		{"/resetting", false, ""},
+		{"hello /new", false, ""},
+		{"", false, ""},
+	}
+	for _, tc := range cases {
+		matched, tail := ParseResetCommand(tc.in)
+		if matched != tc.matched || tail != tc.tail {
+			t.Errorf("ParseResetCommand(%q) = (%v, %q), want (%v, %q)", tc.in, matched, tail, tc.matched, tc.tail)
+		}
+	}
+}

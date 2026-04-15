@@ -16,6 +16,7 @@ import (
 
 	"yak-go/internal/channel"
 	clichannel "yak-go/internal/channel/cli"
+	discordchannel "yak-go/internal/channel/discord"
 	imessagechannel "yak-go/internal/channel/imessage"
 	"yak-go/internal/channel/sched"
 	"yak-go/internal/cli"
@@ -32,6 +33,14 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "init" {
+		if err := runInit(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "init failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := loadDotenv(".env"); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: loading .env: %v\n", err)
 	}
@@ -189,6 +198,25 @@ func main() {
 		}
 	}
 
+	// Parse Discord config early so the send tool can be included in builtinTools.
+	var discordCfg *discordchannel.Config
+	if token := os.Getenv("YAK_DISCORD_TOKEN"); token != "" {
+		var owners []string
+		if raw := os.Getenv("YAK_DISCORD_OWNER_IDS"); raw != "" {
+			for _, id := range strings.Split(raw, ",") {
+				if id = strings.TrimSpace(id); id != "" {
+					owners = append(owners, id)
+				}
+			}
+		}
+		cfg := discordchannel.Config{
+			Token:    token,
+			OwnerIDs: owners,
+			GuildTag: os.Getenv("YAK_DISCORD_GUILD_TAG"),
+		}
+		discordCfg = &cfg
+	}
+
 	builtinTools := []tools.Tool{
 		tools.NewReadTool(tools.OSFS{}),
 		tools.NewWriteTool(tools.OSFS{}),
@@ -211,6 +239,11 @@ func main() {
 		builtinTools = append(builtinTools, tools.NewIMessageSendTool(tools.IMessageSendConfig{
 			ServerURL: imsgCfg.ServerURL,
 			Password:  imsgCfg.Password,
+		}))
+	}
+	if discordCfg != nil {
+		builtinTools = append(builtinTools, tools.NewDiscordSendTool(tools.DiscordSendConfig{
+			Token: discordCfg.Token,
 		}))
 	}
 	var allowedTools, allowedPlugins map[string]struct{}
@@ -385,6 +418,13 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "iMessage channel enabled (webhook :%d%s)\n",
 			imsgCfg.WebhookPort, webhookPath)
+	}
+
+	// Discord — register channel if a token was provided.
+	if discordCfg != nil {
+		channels.Register(discordchannel.New(*discordCfg))
+		fmt.Fprintf(os.Stderr, "Discord channel enabled (owners=%d, tag=%q)\n",
+			len(discordCfg.OwnerIDs), discordCfg.GuildTag)
 	}
 
 	dispatcher := &channel.Dispatcher{

@@ -19,6 +19,9 @@ Environment variables: `YAK_BASE_URL` (API endpoint), `YAK_MODEL` (model name, d
 iMessage channel environment variables (all optional; channel is disabled unless both URL and password are set):
 `YAK_IMESSAGE_SERVER_URL`, `YAK_IMESSAGE_PASSWORD`, `YAK_IMESSAGE_WEBHOOK_PORT` (default `8421`), `YAK_IMESSAGE_WEBHOOK_PATH` (default `/bluebubbles`), `YAK_IMESSAGE_OWNER_HANDLES` (comma-separated), `YAK_IMESSAGE_GROUP_TAG` (e.g. `@yak`).
 
+Discord channel environment variables (channel is disabled unless `YAK_DISCORD_TOKEN` is set):
+`YAK_DISCORD_TOKEN` (bot token), `YAK_DISCORD_OWNER_IDS` (comma-separated Discord user snowflakes), `YAK_DISCORD_GUILD_TAG` (e.g. `@yak` — required in guild channels unless the bot is @mentioned; DMs bypass the check).
+
 ## Architecture
 
 **Agent loop** (`internal/cli/runner.go`): The core cycle is `Runner.agentLoop()`. It calls the LLM, dispatches any tool calls through the `Registry`, appends results as `"tool"` role messages, and loops until the model responds with text. If the model returns empty content after tool calls, the runner retries up to 2 times with a follow-up nudge message.
@@ -38,6 +41,8 @@ iMessage channel environment variables (all optional; channel is disabled unless
 **Channel interface** (`internal/channel/channel.go`): `Channel` has `Name() string`, `Listen(ctx, out chan<- Inbound) error`, and `Send(ctx, Outbound) error`. The `Dispatcher` fans out to all registered channels, routes each inbound message to a conversation keyed by `(Channel, Thread)`, and calls back `Send` on the originating channel with the reply.
 
 **iMessage channel** (`internal/channel/imessage/`): Receives messages via an HTTP webhook that imessage-rs POSTs to (compatible with BlueBubbles API). Sends replies via `POST /api/v1/message/text`. Only forwards messages from `OwnerHandles`; group messages additionally require `GroupTag`. Outbound text has Markdown stripped (`stripMarkdown`) and runner meta-lines like `[tokens: ...]` filtered (`dropMetaLines`) before sending. Handle normalization (`normalizeHandle`) strips service prefixes and normalises phone formatting. When imessage-rs sends an empty `chats` array, the chatGuid is constructed as `iMessage;-;<handle>`. The `imessage_send` tool (`internal/tools/imessage_send.go`) lets the agent proactively send messages.
+
+**Discord channel** (`internal/channel/discord/`): Uses `github.com/bwmarrin/discordgo` to receive messages via the Discord gateway (websocket) and send via REST. Only forwards messages from `OwnerIDs`; guild channels additionally require either an @mention of the bot or the literal `GuildTag` in the message body, which is stripped before dispatch. DMs bypass the tag check. The `Thread` is the Discord channel ID. Outbound meta-lines (`[tokens: ...]`) are filtered and messages over 2000 chars are chunked. The `discord_send` tool (`internal/tools/discord_send.go`) lets the agent proactively post to any channel or DM a user (it opens a DM channel automatically via `UserChannelCreate` when `kind=user`).
 
 ## Conventions
 

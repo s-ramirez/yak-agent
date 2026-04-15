@@ -79,12 +79,17 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 }
 
 func (d *Dispatcher) process(ctx context.Context, in Inbound) {
-	// Handle /new before command expansion: clear the conversation and return.
-	if in.Content == NewConversationCommand {
+	// Handle /new and /reset before command expansion: clear the
+	// conversation. If the command carries a trailing body, fall through
+	// and treat that body as the first user message of the fresh session.
+	if matched, tail := ParseResetCommand(in.Content); matched {
 		conv := d.Store.Get(Key{Channel: in.Channel, Thread: in.Thread})
 		conv.Messages = nil
-		d.replyText(ctx, in.Channel, in.Thread, "New conversation started.\n")
-		return
+		if tail == "" {
+			d.replyText(ctx, in.Channel, in.Thread, "New conversation started.\n")
+			return
+		}
+		in.Content = tail
 	}
 
 	content := in.Content
