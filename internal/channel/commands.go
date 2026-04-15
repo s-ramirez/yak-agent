@@ -11,6 +11,7 @@ import (
 const (
 	SkillPrefix          = "/skill:"
 	MemoryDistillCommand = "/memory:distill"
+	NewConversationCommand = "/new"
 )
 
 // DistillInstruction is the fixed prompt used by both the manual

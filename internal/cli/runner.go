@@ -40,7 +40,10 @@ type Runner struct {
 	PluginPrompts   []string
 	AgentID         string // "main" or "subagent-N"
 	AgentName       string // human-readable name
-	Prompt          string // opening of the system prompt (from agent.md body)
+	Prompt          string // opening of the system prompt (from AGENTS.md body)
+	// ContextFiles are embedded verbatim at the top of the system prompt.
+	// Typically SOUL.md and USER.md from the .yak/ workspace.
+	ContextFiles []prompt.ContextFile
 	ContextSize     int    // model context window in tokens; 0 = unknown
 	OnUsage         func(usage *types.Usage)
 	UsageHooks      []plugin.UsageHook
@@ -129,7 +132,7 @@ func (r *Runner) buildSystemPrompt() string {
 
 	curated := r.loadCuratedMemory()
 	pluginPrompts := r.composePluginPrompts()
-	return prompt.BuildSystemPrompt(r.Prompt, availableTools, r.Skills, env, curated, pluginPrompts)
+	return prompt.BuildSystemPrompt(r.Prompt, availableTools, r.Skills, env, curated, pluginPrompts, r.ContextFiles...)
 }
 
 // composePluginPrompts returns plugin sections plus a synthesized

@@ -7,12 +7,12 @@ import (
 	"strings"
 )
 
-// LoadAgentConfig loads an optional .yak/agent.md file. Searches dirs in order;
+// LoadAgentConfig loads an optional .yak/AGENTS.md file. Searches dirs in order;
 // last found wins (project overrides home). Returns nil if no file present.
 func LoadAgentConfig(dirs ...string) (*Definition, error) {
 	var found *Definition
 	for _, dir := range dirs {
-		path := filepath.Join(dir, "agent.md")
+		path := filepath.Join(dir, "AGENTS.md")
 		info, err := os.Stat(path)
 		if err != nil || info.IsDir() {
 			continue

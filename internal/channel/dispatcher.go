@@ -79,6 +79,14 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 }
 
 func (d *Dispatcher) process(ctx context.Context, in Inbound) {
+	// Handle /new before command expansion: clear the conversation and return.
+	if in.Content == NewConversationCommand {
+		conv := d.Store.Get(Key{Channel: in.Channel, Thread: in.Thread})
+		conv.Messages = nil
+		d.replyText(ctx, in.Channel, in.Thread, "New conversation started.\n")
+		return
+	}
+
 	content := in.Content
 	if d.Commands != nil {
 		expanded, err := d.Commands.Expand(in.Content)

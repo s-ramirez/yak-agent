@@ -16,6 +16,7 @@ import (
 
 	"yak-go/internal/channel"
 	clichannel "yak-go/internal/channel/cli"
+	imessagechannel "yak-go/internal/channel/imessage"
 	"yak-go/internal/channel/sched"
 	"yak-go/internal/cli"
 	"yak-go/internal/compaction"
@@ -23,6 +24,7 @@ import (
 	"yak-go/internal/memory"
 	"yak-go/internal/plugin"
 	"yak-go/internal/plugin/webui"
+	"yak-go/internal/prompt"
 	"yak-go/internal/schedule"
 	"yak-go/internal/skills"
 	"yak-go/internal/subagents"
@@ -152,6 +154,41 @@ func main() {
 		}
 	}
 
+	// Parse iMessage config early so the send tool can be included in builtinTools.
+	var imsgCfg *imessagechannel.Config
+	if imsgURL := os.Getenv("YAK_IMESSAGE_SERVER_URL"); imsgURL != "" {
+		imsgPassword := os.Getenv("YAK_IMESSAGE_PASSWORD")
+		if imsgPassword == "" {
+			fmt.Fprintf(os.Stderr, "warning: YAK_IMESSAGE_SERVER_URL set but YAK_IMESSAGE_PASSWORD is empty; iMessage channel disabled\n")
+		} else {
+			imsgPort := 8421
+			if p := os.Getenv("YAK_IMESSAGE_WEBHOOK_PORT"); p != "" {
+				if n, err := strconv.Atoi(p); err == nil && n > 0 {
+					imsgPort = n
+				} else {
+					fmt.Fprintf(os.Stderr, "warning: invalid YAK_IMESSAGE_WEBHOOK_PORT %q, using %d\n", p, imsgPort)
+				}
+			}
+			var imsgOwners []string
+			if raw := os.Getenv("YAK_IMESSAGE_OWNER_HANDLES"); raw != "" {
+				for _, h := range strings.Split(raw, ",") {
+					if h = strings.TrimSpace(h); h != "" {
+						imsgOwners = append(imsgOwners, h)
+					}
+				}
+			}
+			cfg := imessagechannel.Config{
+				ServerURL:    imsgURL,
+				Password:     imsgPassword,
+				WebhookPath:  os.Getenv("YAK_IMESSAGE_WEBHOOK_PATH"),
+				WebhookPort:  imsgPort,
+				OwnerHandles: imsgOwners,
+				GroupTag:     os.Getenv("YAK_IMESSAGE_GROUP_TAG"),
+			}
+			imsgCfg = &cfg
+		}
+	}
+
 	builtinTools := []tools.Tool{
 		tools.NewReadTool(tools.OSFS{}),
 		tools.NewWriteTool(tools.OSFS{}),
@@ -169,6 +206,12 @@ func main() {
 	}
 	if scheduleStore != nil {
 		builtinTools = append(builtinTools, tools.NewScheduleTool(scheduleStore))
+	}
+	if imsgCfg != nil {
+		builtinTools = append(builtinTools, tools.NewIMessageSendTool(tools.IMessageSendConfig{
+			ServerURL: imsgCfg.ServerURL,
+			Password:  imsgCfg.Password,
+		}))
 	}
 	var allowedTools, allowedPlugins map[string]struct{}
 	if agentCfg != nil {
@@ -259,6 +302,9 @@ func main() {
 		contextSize = agentCfg.ContextSize
 	}
 
+	// Load SOUL.md and USER.md from agentDirs; last found wins (project overrides home).
+	contextFiles := loadContextFiles(agentDirs, "SOUL.md", "USER.md")
+
 	var userActivity bool
 	runner := cli.Runner{
 		Client:          chatClient,
@@ -273,6 +319,7 @@ func main() {
 		AgentName:       "orchestrator",
 		Prompt:          agentPrompt,
 		ContextSize:     contextSize,
+		ContextFiles:    contextFiles,
 		MemoryStore:     memoryStore,
 		Scheduler:       scheduler,
 		Compaction:      compaction.DefaultSettings,
@@ -327,6 +374,17 @@ func main() {
 			Scheduler: scheduler,
 			Target:    channel.Key{Channel: clichannel.Name, Thread: clichannel.DefaultThread},
 		})
+	}
+
+	// iMessage via BlueBubbles — register channel if config was parsed successfully.
+	if imsgCfg != nil {
+		channels.Register(imessagechannel.New(*imsgCfg))
+		webhookPath := imsgCfg.WebhookPath
+		if webhookPath == "" {
+			webhookPath = "/bluebubbles"
+		}
+		fmt.Fprintf(os.Stderr, "iMessage channel enabled (webhook :%d%s)\n",
+			imsgCfg.WebhookPort, webhookPath)
 	}
 
 	dispatcher := &channel.Dispatcher{
@@ -427,6 +485,29 @@ func loadDotenv(path string) error {
 		os.Setenv(key, val)
 	}
 	return scanner.Err()
+}
+
+// loadContextFiles reads the named files from each dir in order; last found
+// wins (project-level overrides home-level). Files that don't exist are skipped.
+func loadContextFiles(dirs []string, names ...string) []prompt.ContextFile {
+	latest := make(map[string]prompt.ContextFile, len(names))
+	for _, dir := range dirs {
+		for _, name := range names {
+			path := filepath.Join(dir, name)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			latest[name] = prompt.ContextFile{Path: path, Content: string(data)}
+		}
+	}
+	result := make([]prompt.ContextFile, 0, len(names))
+	for _, name := range names {
+		if cf, ok := latest[name]; ok {
+			result = append(result, cf)
+		}
+	}
+	return result
 }
 
 func formatParams(params json.RawMessage) string {

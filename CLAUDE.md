@@ -16,6 +16,9 @@ Run the CLI: `go run ./cmd/yak` (requires an OpenAI-compatible API, defaults to 
 
 Environment variables: `YAK_BASE_URL` (API endpoint), `YAK_MODEL` (model name, default `"default"`).
 
+iMessage channel environment variables (all optional; channel is disabled unless both URL and password are set):
+`YAK_IMESSAGE_SERVER_URL`, `YAK_IMESSAGE_PASSWORD`, `YAK_IMESSAGE_WEBHOOK_PORT` (default `8421`), `YAK_IMESSAGE_WEBHOOK_PATH` (default `/bluebubbles`), `YAK_IMESSAGE_OWNER_HANDLES` (comma-separated), `YAK_IMESSAGE_GROUP_TAG` (e.g. `@yak`).
+
 ## Architecture
 
 **Agent loop** (`internal/cli/runner.go`): The core cycle is `Runner.agentLoop()`. It calls the LLM, dispatches any tool calls through the `Registry`, appends results as `"tool"` role messages, and loops until the model responds with text. If the model returns empty content after tool calls, the runner retries up to 2 times with a follow-up nudge message.
@@ -31,6 +34,10 @@ Environment variables: `YAK_BASE_URL` (API endpoint), `YAK_MODEL` (model name, d
 **System prompt** (`internal/prompt/system.go`): `BuildSystemPrompt(tools, skills, env)` assembles the prompt from sections: environment info (OS, arch, workspace, time), per-tool guidelines, conditional tool-selection rules, and an `<available_skills>` XML block listing visible skills with their name, description, and file location.
 
 **LLM client** (`internal/llm/client.go`): `ChatClient` interface with a single `Chat()` method. The concrete `Client` posts to `/v1/chat/completions` (OpenAI-compatible format).
+
+**Channel interface** (`internal/channel/channel.go`): `Channel` has `Name() string`, `Listen(ctx, out chan<- Inbound) error`, and `Send(ctx, Outbound) error`. The `Dispatcher` fans out to all registered channels, routes each inbound message to a conversation keyed by `(Channel, Thread)`, and calls back `Send` on the originating channel with the reply.
+
+**iMessage channel** (`internal/channel/imessage/`): Receives messages via an HTTP webhook that imessage-rs POSTs to (compatible with BlueBubbles API). Sends replies via `POST /api/v1/message/text`. Only forwards messages from `OwnerHandles`; group messages additionally require `GroupTag`. Outbound text has Markdown stripped (`stripMarkdown`) and runner meta-lines like `[tokens: ...]` filtered (`dropMetaLines`) before sending. Handle normalization (`normalizeHandle`) strips service prefixes and normalises phone formatting. When imessage-rs sends an empty `chats` array, the chatGuid is constructed as `iMessage;-;<handle>`. The `imessage_send` tool (`internal/tools/imessage_send.go`) lets the agent proactively send messages.
 
 ## Conventions
 

@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"yak-go/internal/skills"
@@ -16,13 +17,32 @@ type Environment struct {
 	Time      string
 }
 
+// ContextFile is a named file to embed verbatim in the system prompt under
+// the "# Context Files" section. Path is shown as the section header.
+type ContextFile struct {
+	Path    string
+	Content string
+}
+
 const defaultPrompt = "You are a coding assistant. You help the user by reading, writing, editing files, and executing commands when needed."
 
-func BuildSystemPrompt(agentPrompt string, available []tools.Tool, loadedSkills []skills.Skill, env Environment, curatedMemory string, pluginSections []string) string {
+func BuildSystemPrompt(agentPrompt string, available []tools.Tool, loadedSkills []skills.Skill, env Environment, curatedMemory string, pluginSections []string, contextFiles ...ContextFile) string {
 	if strings.TrimSpace(agentPrompt) == "" {
 		agentPrompt = defaultPrompt
 	}
+	// Context files (SOUL.md, USER.md) are injected first so they frame
+	// everything that follows. The agent prompt may reference or reinforce them.
+	if s := buildContextFilesSection(contextFiles); s != "" {
+		return strings.Join(append([]string{s, agentPrompt}, buildRemainder(available, loadedSkills, env, curatedMemory, pluginSections)...), "\n\n")
+	}
+
 	sections := []string{agentPrompt}
+	sections = append(sections, buildRemainder(available, loadedSkills, env, curatedMemory, pluginSections)...)
+	return strings.Join(sections, "\n\n")
+}
+
+func buildRemainder(available []tools.Tool, loadedSkills []skills.Skill, env Environment, curatedMemory string, pluginSections []string) []string {
+	var sections []string
 
 	sections = append(sections, buildEnvironment(env))
 
@@ -45,7 +65,44 @@ func BuildSystemPrompt(agentPrompt string, available []tools.Tool, loadedSkills 
 		}
 	}
 
-	return strings.Join(sections, "\n\n")
+	return sections
+}
+
+func buildContextFilesSection(files []ContextFile) string {
+	var valid []ContextFile
+	for _, f := range files {
+		if strings.TrimSpace(f.Path) != "" && strings.TrimSpace(f.Content) != "" {
+			valid = append(valid, f)
+		}
+	}
+	if len(valid) == 0 {
+		return ""
+	}
+
+	hasSoul := false
+	for _, f := range valid {
+		base := filepath.Base(f.Path)
+		if strings.EqualFold(base, "soul.md") {
+			hasSoul = true
+			break
+		}
+	}
+
+	lines := []string{"# Context Files"}
+	lines = append(lines, "The following files describe who you are and who you're helping.")
+	if hasSoul {
+		lines = append(lines, "SOUL.md defines your persona — embody it. Avoid generic replies; follow its guidance unless a higher-priority instruction overrides it.")
+	}
+	lines = append(lines, "You can update these files with the write or edit tool as you learn more.")
+	lines = append(lines, "")
+
+	for _, f := range valid {
+		lines = append(lines, "## "+f.Path)
+		lines = append(lines, "")
+		lines = append(lines, f.Content)
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 func buildCuratedMemorySection(curated string, available []tools.Tool) string {
