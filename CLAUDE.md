@@ -17,10 +17,10 @@ Run the CLI: `go run ./cmd/yak` (requires an OpenAI-compatible API, defaults to 
 Environment variables: `YAK_BASE_URL` (API endpoint), `YAK_MODEL` (model name, default `"default"`).
 
 iMessage channel environment variables (all optional; channel is disabled unless both URL and password are set):
-`YAK_IMESSAGE_SERVER_URL`, `YAK_IMESSAGE_PASSWORD`, `YAK_IMESSAGE_WEBHOOK_PORT` (default `8421`), `YAK_IMESSAGE_WEBHOOK_PATH` (default `/bluebubbles`), `YAK_IMESSAGE_OWNER_HANDLES` (comma-separated), `YAK_IMESSAGE_GROUP_TAG` (e.g. `@yak`).
+`YAK_IMESSAGE_ENABLED` (default `true`; set to `false`/`0` to force-disable even when creds are present), `YAK_IMESSAGE_SERVER_URL`, `YAK_IMESSAGE_PASSWORD`, `YAK_IMESSAGE_WEBHOOK_PORT` (default `8421`), `YAK_IMESSAGE_WEBHOOK_PATH` (default `/bluebubbles`), `YAK_IMESSAGE_OWNER_HANDLES` (comma-separated), `YAK_IMESSAGE_GROUP_TAG` (e.g. `@yak`).
 
 Discord channel environment variables (channel is disabled unless `YAK_DISCORD_TOKEN` is set):
-`YAK_DISCORD_TOKEN` (bot token), `YAK_DISCORD_OWNER_IDS` (comma-separated Discord user snowflakes), `YAK_DISCORD_GUILD_TAG` (e.g. `@yak` — required in guild channels unless the bot is @mentioned; DMs bypass the check).
+`YAK_DISCORD_ENABLED` (default `true`; set to `false`/`0` to force-disable even when a token is present), `YAK_DISCORD_TOKEN` (bot token), `YAK_DISCORD_OWNER_IDS` (comma-separated Discord user snowflakes), `YAK_DISCORD_GUILD_TAG` (e.g. `@yak` — required in guild channels unless the bot is @mentioned; DMs bypass the check).
 
 ## Architecture
 

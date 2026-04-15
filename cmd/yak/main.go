@@ -165,7 +165,9 @@ func main() {
 
 	// Parse iMessage config early so the send tool can be included in builtinTools.
 	var imsgCfg *imessagechannel.Config
-	if imsgURL := os.Getenv("YAK_IMESSAGE_SERVER_URL"); imsgURL != "" {
+	if !envEnabled("YAK_IMESSAGE_ENABLED") {
+		fmt.Fprintln(os.Stderr, "iMessage channel disabled via YAK_IMESSAGE_ENABLED")
+	} else if imsgURL := os.Getenv("YAK_IMESSAGE_SERVER_URL"); imsgURL != "" {
 		imsgPassword := os.Getenv("YAK_IMESSAGE_PASSWORD")
 		if imsgPassword == "" {
 			fmt.Fprintf(os.Stderr, "warning: YAK_IMESSAGE_SERVER_URL set but YAK_IMESSAGE_PASSWORD is empty; iMessage channel disabled\n")
@@ -200,7 +202,9 @@ func main() {
 
 	// Parse Discord config early so the send tool can be included in builtinTools.
 	var discordCfg *discordchannel.Config
-	if token := os.Getenv("YAK_DISCORD_TOKEN"); token != "" {
+	if !envEnabled("YAK_DISCORD_ENABLED") {
+		fmt.Fprintln(os.Stderr, "Discord channel disabled via YAK_DISCORD_ENABLED")
+	} else if token := os.Getenv("YAK_DISCORD_TOKEN"); token != "" {
 		var owners []string
 		if raw := os.Getenv("YAK_DISCORD_OWNER_IDS"); raw != "" {
 			for _, id := range strings.Split(raw, ",") {
@@ -335,8 +339,8 @@ func main() {
 		contextSize = agentCfg.ContextSize
 	}
 
-	// Load SOUL.md and USER.md from agentDirs; last found wins (project overrides home).
-	contextFiles := loadContextFiles(agentDirs, "SOUL.md", "USER.md")
+	// Load IDENTITY.md and USER.md from agentDirs; last found wins (project overrides home).
+	contextFiles := loadContextFiles(agentDirs, "IDENTITY.md", "USER.md")
 
 	var userActivity bool
 	runner := cli.Runner{
@@ -469,6 +473,20 @@ func (h *logHook) AfterToolCall(_ tools.HookContext, name string, params json.Ra
 
 func formatToolCall(name string, params json.RawMessage) string {
 	return fmt.Sprintf("%s(%s)", name, formatParams(params))
+}
+
+// envEnabled returns true unless the env var is explicitly set to a falsy
+// value (0/false/no/off, case-insensitive). Empty or unset = enabled.
+func envEnabled(name string) bool {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return true
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return true
+	}
+	return b
 }
 
 func nameSet(names []string) map[string]struct{} {

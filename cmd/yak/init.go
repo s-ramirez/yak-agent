@@ -14,8 +14,8 @@ import (
 //go:embed templates/AGENTS.md
 var tplAgents string
 
-//go:embed templates/SOUL.md
-var tplSoul string
+//go:embed templates/IDENTITY.md
+var tplIdentity string
 
 //go:embed templates/USER.md
 var tplUser string
@@ -47,7 +47,7 @@ func runInit(args []string) error {
 
 	fmt.Fprintln(out, "Templates:")
 	writeTemplateFile(out, filepath.Join(yakDir, "AGENTS.md"), tplAgents)
-	writeTemplateFile(out, filepath.Join(yakDir, "SOUL.md"), tplSoul)
+	writeTemplateFile(out, filepath.Join(yakDir, "IDENTITY.md"), tplIdentity)
 	writeTemplateFile(out, filepath.Join(yakDir, "USER.md"), tplUser)
 	writeTemplateFile(out, filepath.Join(memoryDir, "MEMORY.md"), tplMemory)
 

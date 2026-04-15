@@ -30,7 +30,7 @@ func BuildSystemPrompt(agentPrompt string, available []tools.Tool, loadedSkills 
 	if strings.TrimSpace(agentPrompt) == "" {
 		agentPrompt = defaultPrompt
 	}
-	// Context files (SOUL.md, USER.md) are injected first so they frame
+	// Context files (IDENTITY.md, USER.md) are injected first so they frame
 	// everything that follows. The agent prompt may reference or reinforce them.
 	if s := buildContextFilesSection(contextFiles); s != "" {
 		return strings.Join(append([]string{s, agentPrompt}, buildRemainder(available, loadedSkills, env, curatedMemory, pluginSections)...), "\n\n")
@@ -79,19 +79,19 @@ func buildContextFilesSection(files []ContextFile) string {
 		return ""
 	}
 
-	hasSoul := false
+	hasIdentity := false
 	for _, f := range valid {
 		base := filepath.Base(f.Path)
-		if strings.EqualFold(base, "soul.md") {
-			hasSoul = true
+		if strings.EqualFold(base, "identity.md") {
+			hasIdentity = true
 			break
 		}
 	}
 
 	lines := []string{"# Context Files"}
 	lines = append(lines, "The following files describe who you are and who you're helping.")
-	if hasSoul {
-		lines = append(lines, "SOUL.md defines your persona — embody it. Avoid generic replies; follow its guidance unless a higher-priority instruction overrides it.")
+	if hasIdentity {
+		lines = append(lines, "IDENTITY.md defines your persona — embody it. Avoid generic replies; follow its guidance unless a higher-priority instruction overrides it.")
 	}
 	lines = append(lines, "You can update these files with the write or edit tool as you learn more.")
 	lines = append(lines, "")

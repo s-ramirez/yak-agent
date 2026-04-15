@@ -1,0 +1,96 @@
+# Repository Guidelines
+
+- Repo: https://github.com/s-ramirez/yak-go
+- In chat replies, file references must be repo-root relative only (example: `internal/channel/discord/channel.go:80`); never absolute paths or `~/...`.
+- Companion bootstrap files: `IDENTITY.md` captures the agent's persona and working style, `USER.md` captures stable collaborator preferences. Keep them aligned with this file when conventions evolve.
+
+## Project Structure & Module Organization
+
+- CLI entrypoint: `cmd/yak/` (`main.go` wires dependencies; `init.go` bootstraps a `.yak` workspace; embedded templates under `cmd/yak/templates/`).
+- Internal packages under `internal/`:
+  - `cli/` — interactive runner and agent loop (`runner.go:Runner.agentLoop`).
+  - `llm/` — OpenAI-compatible chat completions client.
+  - `prompt/` — system prompt assembly.
+  - `tools/` — tool implementations (`read`, `write`, `edit`, `bash`, `grep`, `ls`, `find`, `web_fetch`, `web_search`, `imessage_send`, `discord_send`).
+  - `channel/` — inbound/outbound messaging channels (`imessage/`, `discord/`).
+  - `skills/` — `SKILL.md` loader for user-invocable skills.
+  - `subagents/` — multi-provider sub-agent definitions.
+  - `memory/` — persistent memory store.
+  - `compaction/`, `schedule/`, `plugin/`, `types/` — supporting packages.
+- Workspace state: `.yak/` (project) and `~/.yak/` (user) hold `AGENTS.md`, `IDENTITY.md`, `USER.md`, `memory/`, `skills/`, `subagents/`.
+- Reference docs and templates live under `docs/reference/`.
+
+## Build, Test, and Development Commands
+
+- Runtime baseline: Go **1.26.1+**.
+- Build: `go build ./...`
+- Run CLI: `go run ./cmd/yak` (requires an OpenAI-compatible API; defaults to `http://localhost:1234`).
+- Full test suite: `go test ./...`
+- Single package: `go test ./internal/tools/`
+- Single test: `go test ./internal/tools/ -run TestGrepToolFindsPattern`
+- Verbose: `go test -v ./...`
+- Bootstrap a workspace: `yak init` (writes `.yak/AGENTS.md`, `.yak/IDENTITY.md`, `.yak/USER.md`, `.yak/memory/MEMORY.md`, prompts for `.env` keys).
+- Preferred landing bar before pushing `main`: `go build ./...` and `go test ./...` green.
+- For narrowly scoped changes, prefer a narrowly scoped test that directly validates the touched behavior. If no meaningful scoped test exists, say so explicitly.
+- Do not use scoped tests as permission to ignore plausibly related failures.
+
+## Environment Variables
+
+- Core: `YAK_BASE_URL` (default `http://localhost:1234`), `YAK_MODEL` (default `default`), `YAK_API_KEY` (optional bearer), `YAK_WEBUI_PORT`, `YAK_LOG_DIR`, `YAK_HEARTBEAT_INTERVAL`.
+- iMessage (BlueBubbles): `YAK_IMESSAGE_ENABLED`, `YAK_IMESSAGE_SERVER_URL`, `YAK_IMESSAGE_PASSWORD`, `YAK_IMESSAGE_WEBHOOK_PORT`, `YAK_IMESSAGE_WEBHOOK_PATH`, `YAK_IMESSAGE_OWNER_HANDLES`, `YAK_IMESSAGE_GROUP_TAG`.
+- Discord: `YAK_DISCORD_ENABLED`, `YAK_DISCORD_TOKEN`, `YAK_DISCORD_OWNER_IDS`, `YAK_DISCORD_GUILD_TAG`.
+- Web search: `YAK_BRAVE_API_KEY` or `BRAVE_API_KEY`.
+
+## Architecture Notes
+
+- **Agent loop** (`internal/cli/runner.go`): `Runner.agentLoop()` calls the LLM, dispatches any tool calls through the `Registry`, appends results as `"tool"` role messages, and loops until the model responds with text. On empty content after tool calls, retries up to 2 times with a nudge.
+- **Tool interface** (`internal/tools/types.go`): `Tool.Definition()` returns metadata + JSON schema; `Tool.Execute(ctx, json.RawMessage)` returns `(ToolResult, error)`. Tool-level errors (bad args, file not found) are returned as `ToolResult{IsError: true}` via `errorResult`/`errorResultf` helpers, not as Go errors.
+- **Tool hooks** (`internal/tools/types.go`): `BeforeToolCall` can block execution by returning a reason string; `AfterToolCall` observes results. Hooks register on the `Registry`.
+- **Filesystem abstraction** (`internal/tools/fs.go`): Tools that touch files take an `FS` interface. Production uses `OSFS{}`. Directory-walking tools (`grep`, `find`, `bash`) use `os` directly.
+- **Skills** (`internal/skills/`): `SKILL.md` files with YAML frontmatter (`name`, `description`, `disable-model-invocation`). Discovered from `~/.yak/skills/` and `.yak/skills/`. First name wins on collision. Invoke with `/skill:<name> [args]`.
+- **System prompt** (`internal/prompt/system.go`): `BuildSystemPrompt(tools, skills, env, ...)` assembles environment info, per-tool guidelines, tool-selection rules, `<available_skills>` block, and injects context files (`IDENTITY.md`, `USER.md`) at the top.
+- **Channels** (`internal/channel/`): `Channel` has `Name()`, `Listen(ctx, out chan<- Inbound)`, and `Send(ctx, Outbound)`. The `Dispatcher` fans out to all channels and routes conversations by `(Channel, Thread)`. When refactoring shared channel logic (routing, allowlists, filtering), always consider **all** channels.
+
+## Coding Style & Conventions
+
+- **Minimal external dependencies.** Prefer the standard library. External deps are allowed when they earn their keep — pick focused, small, well-maintained packages over reimplementing non-trivial logic. Avoid anything that pulls a large transitive tree or forces CGo.
+- **Tool parameter structs** are named `<ToolName>Params` with JSON tags matching schema field names exactly. Unmarshal with `json.Unmarshal(raw, &params)`.
+- **Tool definitions** are module-level vars (`var bashDefinition = ToolDefinition{...}`), not generated at runtime.
+- **Directory skipping**: `grep` and `find` skip `.git`, `node_modules`, `__pycache__`, `.cache` via `filepath.SkipDir`.
+- **Output truncation**: enforce default limits (`read`: 2000 lines, `grep`: 100 matches, `ls`: 500 entries, `find`: 1000 results) and append `[... limit reached]` when truncated.
+- **Skill files** are `SKILL.md` with YAML frontmatter. `name` must be lowercase alphanumeric with hyphens, max 64 chars. `description` is required.
+- Keep files concise; extract helpers instead of "V2" copies. Aim for <500 LOC per file as a guideline.
+- Add brief comments only for non-obvious logic. Don't narrate what well-named identifiers already say.
+- Written English: American spelling in code, comments, docs, UI strings.
+
+## Testing Guidelines
+
+- Framework: standard `testing` package.
+- Filesystem tests use `t.TempDir()`. HTTP tests use `httptest.NewServer`. Build tool inputs with `json.Marshal(Params{...})`.
+- A shared `writeFile` helper exists in `grep_test.go` and `loader_test.go` for creating temp files.
+- Naming: match source names with `*_test.go`.
+- Run `go test ./...` before pushing when you touch logic.
+- Do not modify snapshot, baseline, or expected-failure files to silence failing checks without explicit approval.
+
+## Commit & Pull Request Guidelines
+
+- Commit messages: concise, action-oriented (e.g., `tools: add find limit marker`).
+- Group related changes; avoid bundling unrelated refactors.
+- Prefer creating new commits over amending published ones.
+- Never skip hooks (`--no-verify`) or bypass signing without explicit approval.
+
+## Security & Configuration Tips
+
+- Never commit real API keys, phone numbers, tokens, or live configuration values. Use obviously fake placeholders in docs, tests, and examples.
+- `.env` is loaded automatically but must never be committed.
+- Web search credentials live in `YAK_BRAVE_API_KEY` / `BRAVE_API_KEY`.
+- Channel credentials (`YAK_IMESSAGE_PASSWORD`, `YAK_DISCORD_TOKEN`) stay in `.env`; do not echo them in logs or replies.
+
+## Collaboration / Safety Notes
+
+- When working on a GitHub issue or PR, print the full URL at the end of the task.
+- When answering questions, respond with high-confidence answers only: verify in code; do not guess.
+- **Multi-agent safety:** do not create/apply/drop `git stash` entries unless explicitly requested. Do not create/remove/modify `git worktree` checkouts. Do not switch branches unless explicitly requested.
+- **Multi-agent safety:** when you see unrecognized files, keep going; focus on your changes and commit only those.
+- Bug investigations: read the source of relevant dependencies and all related local code before concluding; aim for a high-confidence root cause.
+- Destructive or hard-to-reverse actions (`git reset --hard`, force push, deleting branches, dropping migrations) require explicit user approval every time.
