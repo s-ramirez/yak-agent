@@ -311,11 +311,6 @@ func main() {
 		}
 	}
 
-	registry := tools.NewRegistry(allTools...)
-	for _, hook := range baseHooks {
-		registry.AddHook(hook)
-	}
-
 	skillDirs := []string{
 		filepath.Join(home, ".yak", "skills"),
 		filepath.Join(cwd, ".yak", "skills"),
@@ -326,6 +321,28 @@ func main() {
 	}
 	for _, d := range diags {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", d)
+	}
+	skillsRegistry := skills.NewRegistry(loadedSkills)
+	reloadSkills := func() error {
+		reloaded, rdiags, rerr := skills.LoadSkills(skillDirs...)
+		if rerr != nil {
+			return rerr
+		}
+		for _, d := range rdiags {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", d)
+		}
+		skillsRegistry.Replace(reloaded)
+		return nil
+	}
+	projectSkillsDir := filepath.Join(cwd, ".yak", "skills")
+	skillWriteLogPath := filepath.Join(cwd, ".yak", "logs", "skill_writes.log")
+	// skill_write is orchestrator-only — appended to allTools, not builtinTools,
+	// so subagents don't inherit it.
+	allTools = append(allTools, tools.NewSkillWriteTool(projectSkillsDir, skillWriteLogPath, reloadSkills))
+
+	registry := tools.NewRegistry(allTools...)
+	for _, hook := range baseHooks {
+		registry.AddHook(hook)
 	}
 
 	if section := subagents.BuildPromptSection(defs); section != "" {
@@ -346,7 +363,7 @@ func main() {
 	runner := cli.Runner{
 		Client:          chatClient,
 		Registry:        registry,
-		Skills:          loadedSkills,
+		Skills:          skillsRegistry,
 		AfterTurnHooks:  afterTurnHooks,
 		AgentStartHooks: agentStartHooks,
 		AgentEndHooks:   agentEndHooks,
@@ -434,7 +451,7 @@ func main() {
 	dispatcher := &channel.Dispatcher{
 		Channels:    channels,
 		Store:       channel.NewStore(),
-		Commands:    &channel.CommandExpander{Skills: loadedSkills},
+		Commands:    &channel.CommandExpander{Skills: skillsRegistry},
 		Handler:     &runner,
 		OnUserInput: func() { userActivity = true },
 		Logger: func(format string, args ...any) {

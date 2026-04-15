@@ -33,7 +33,7 @@ import (
 type Runner struct {
 	Client          llm.ChatClient
 	Registry        *tools.Registry
-	Skills          []skills.Skill
+	Skills          *skills.Registry
 	AfterTurnHooks  []plugin.AfterTurnHook
 	AgentStartHooks []plugin.AgentStartHook
 	AgentEndHooks   []plugin.AgentEndHook
@@ -132,7 +132,7 @@ func (r *Runner) buildSystemPrompt() string {
 
 	curated := r.loadCuratedMemory()
 	pluginPrompts := r.composePluginPrompts()
-	return prompt.BuildSystemPrompt(r.Prompt, availableTools, r.Skills, env, curated, pluginPrompts, r.ContextFiles...)
+	return prompt.BuildSystemPrompt(r.Prompt, availableTools, r.Skills.Snapshot(), env, curated, pluginPrompts, r.ContextFiles...)
 }
 
 // composePluginPrompts returns plugin sections plus a synthesized

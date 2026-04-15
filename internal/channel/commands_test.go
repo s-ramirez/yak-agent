@@ -39,7 +39,7 @@ func TestCommandExpanderSkillLoadsFile(t *testing.T) {
 	}
 
 	e := &CommandExpander{
-		Skills: []skills.Skill{{Name: "review", FilePath: path}},
+		Skills: skills.NewRegistry([]skills.Skill{{Name: "review", FilePath: path}}),
 	}
 	got, err := e.Expand("/skill:review")
 	if err != nil {
@@ -58,7 +58,7 @@ func TestCommandExpanderSkillWithArgsAppendsThem(t *testing.T) {
 	}
 
 	e := &CommandExpander{
-		Skills: []skills.Skill{{Name: "review", FilePath: path}},
+		Skills: skills.NewRegistry([]skills.Skill{{Name: "review", FilePath: path}}),
 	}
 	got, err := e.Expand("/skill:review PR 42")
 	if err != nil {

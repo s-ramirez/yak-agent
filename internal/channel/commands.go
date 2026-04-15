@@ -51,7 +51,7 @@ Do not ask the user questions — this is a background review.`
 // model actually sees. Unknown input is returned unchanged so regular
 // messages pass through untouched.
 type CommandExpander struct {
-	Skills []skills.Skill
+	Skills *skills.Registry
 }
 
 func (e *CommandExpander) Expand(input string) (string, error) {
@@ -70,7 +70,7 @@ func (e *CommandExpander) Expand(input string) (string, error) {
 		args = strings.TrimSpace(rest[idx+1:])
 	}
 
-	for _, s := range e.Skills {
+	for _, s := range e.Skills.Snapshot() {
 		if s.Name == name {
 			content, err := os.ReadFile(s.FilePath)
 			if err != nil {
