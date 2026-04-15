@@ -179,6 +179,8 @@ func main() {
 		tools.NewGrepTool(searchDelegationGuidelines...),
 		tools.NewLsTool(tools.OSFS{}),
 		tools.NewFindTool(searchDelegationGuidelines...),
+		tools.NewWebFetchTool(),
+		tools.NewWebSearchTool(),
 		tools.NewMemoryReadTool(memoryStore),
 		tools.NewMemoryWriteTool(memoryStore),
 		tools.NewMemorySearchTool(memoryStore),
