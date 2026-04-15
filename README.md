@@ -6,7 +6,7 @@
 - LM Studio-compatible `/v1/chat/completions` client
 - Optional bearer-token auth for OpenAI-compatible endpoints
 - Dynamic system prompt with environment info and tool-selection rules
-- Built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `ls`, `find`
+- Built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `ls`, `find`, `web_fetch`, `web_search`
 - Plugin system with startup-registered plugins; `tilldone` is currently disabled
 - Multi-provider sub-agents and customizable main agent via `.yak/agent.md`
 
@@ -39,6 +39,8 @@ Available settings:
 | `YAK_API_KEY`   | unset                   | Optional bearer token for authenticated APIs |
 | `YAK_WEBUI_PORT`| `8420`                  | Enables the web UI plugin on the given port |
 | `YAK_LOG_DIR`   | unset                   | Writes session logs under a timestamped subdirectory |
+| `YAK_BRAVE_API_KEY` | unset               | Brave Search API key for the `web_search` tool        |
+| `BRAVE_API_KEY` | unset                   | Alternate Brave Search API key env var                |
 
 Example with a custom endpoint:
 
@@ -138,7 +140,7 @@ internal/
   cli/               Interactive runner and agent loop
   llm/               Chat completions client
   prompt/            System prompt generation
-  tools/             Tool implementations (read, write, edit, bash, grep, ls, find)
+  tools/             Tool implementations (read, write, edit, bash, grep, ls, find, web_fetch, web_search)
   types/             Shared request/response types
 ```
 

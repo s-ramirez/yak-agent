@@ -152,6 +152,8 @@ func buildToolSelectionRules(available []tools.Tool) string {
 	hasGrep := false
 	hasLs := false
 	hasFind := false
+	hasWebFetch := false
+	hasWebSearch := false
 	hasSessionsSpawn := false
 	hasSubagents := false
 
@@ -171,6 +173,10 @@ func buildToolSelectionRules(available []tools.Tool) string {
 			hasLs = true
 		case "find":
 			hasFind = true
+		case "web_fetch":
+			hasWebFetch = true
+		case "web_search":
+			hasWebSearch = true
 		case "sessions_spawn":
 			hasSessionsSpawn = true
 		case "subagents":
@@ -215,6 +221,18 @@ func buildToolSelectionRules(available []tools.Tool) string {
 			"- Use find to locate files by name pattern instead of running find via bash.",
 			"- Prefer find over bash for any file search task. Only fall back to bash when you need features find does not support.",
 		)
+	}
+
+	if hasWebSearch {
+		rules = append(rules, "- Use web_search for public web discovery instead of shelling out to ad-hoc search commands.")
+	}
+
+	if hasWebFetch {
+		rules = append(rules, "- Use web_fetch to read a specific web page when you already have a URL.")
+	}
+
+	if hasWebSearch && hasWebFetch {
+		rules = append(rules, "- For web research, use web_search to find candidate pages and web_fetch to read the most relevant ones.")
 	}
 
 	if hasSessionsSpawn {
