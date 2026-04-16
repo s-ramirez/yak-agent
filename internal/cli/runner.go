@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -11,6 +12,7 @@ import (
 
 	"yak-go/internal/channel"
 	"yak-go/internal/compaction"
+	heartbeatPkg "yak-go/internal/heartbeat"
 	"yak-go/internal/llm"
 	"yak-go/internal/memory"
 	"yak-go/internal/plugin"
@@ -44,9 +46,9 @@ type Runner struct {
 	// ContextFiles are embedded verbatim at the top of the system prompt.
 	// Typically IDENTITY.md and USER.md from the .yak/ workspace.
 	ContextFiles []prompt.ContextFile
-	ContextSize     int    // model context window in tokens; 0 = unknown
-	OnUsage         func(usage *types.Usage)
-	UsageHooks      []plugin.UsageHook
+	ContextSize  int // model context window in tokens; 0 = unknown
+	OnUsage      func(usage *types.Usage)
+	UsageHooks   []plugin.UsageHook
 
 	// MemoryStore, if set, provides persistent memory for the agent.
 	// When non-nil, MEMORY.md is loaded and injected into the system prompt
@@ -72,9 +74,22 @@ type Runner struct {
 	// scheduler's event stream is handled by the sched channel adapter,
 	// not by the Runner directly.
 	Scheduler *schedule.Scheduler
+
+	// HeartbeatEnabled, if true, injects HEARTBEAT_OK usage instructions
+	// into the system prompt so the model knows how to suppress no-op
+	// heartbeat turns.
+	HeartbeatEnabled bool
+
+	// ClientForModel, if non-nil, is called to obtain a ChatClient for a
+	// specific model name. Used when conv.ModelOverride is set (e.g. for
+	// heartbeat turns that should use a cheaper/faster model). Falls back
+	// to r.Client when nil or when the override is empty.
+	ClientForModel func(model string) llm.ChatClient
 }
 
 const maxEmptyRetries = 2
+const initialRateLimitBackoff = 30 * time.Second
+const maxRateLimitBackoff = 5 * time.Minute
 const emptyResponseRecoveryPrompt = "Your previous reply was empty. You must now produce a direct assistant response using the conversation and any tool results already returned. Do not call any more tools. Do not repeat completed work. If the task is complete, give the final answer now."
 
 // HandleTurn implements channel.TurnHandler. The dispatcher serializes
@@ -87,6 +102,15 @@ const emptyResponseRecoveryPrompt = "Your previous reply was empty. You must now
 func (r *Runner) HandleTurn(ctx context.Context, conv *channel.Conversation, userContent string, reply channel.ReplyFunc) error {
 	if r.Client == nil {
 		return fmt.Errorf("client is required")
+	}
+
+	// Use a model-specific client when the turn requests an override
+	// (e.g. a heartbeat configured with YAK_HEARTBEAT_MODEL).
+	client := r.Client
+	if conv.ModelOverride != "" && r.ClientForModel != nil {
+		if override := r.ClientForModel(conv.ModelOverride); override != nil {
+			client = override
+		}
 	}
 
 	if len(conv.Messages) == 0 {
@@ -106,7 +130,7 @@ func (r *Runner) HandleTurn(ctx context.Context, conv *channel.Conversation, use
 		toolSchemas = r.Registry.Schemas()
 	}
 
-	_, err := r.agentLoop(ctx, &conv.Messages, toolSchemas, reply)
+	_, err := r.agentLoop(ctx, &conv.Messages, toolSchemas, reply, client)
 	return err
 }
 
@@ -139,6 +163,9 @@ func (r *Runner) buildSystemPrompt() string {
 // <scheduled_tasks> block describing currently-enabled user jobs.
 func (r *Runner) composePluginPrompts() []string {
 	sections := append([]string(nil), r.PluginPrompts...)
+	if r.HeartbeatEnabled {
+		sections = append(sections, heartbeatPkg.SystemPromptInstruction)
+	}
 	if r.Scheduler == nil {
 		return sections
 	}
@@ -211,7 +238,7 @@ func (r *Runner) RunConversation(
 	messages []types.Message,
 	toolSchemas []types.ChatRequestTool,
 ) (string, []types.Message, error) {
-	finalText, err := r.agentLoop(ctx, &messages, toolSchemas, nil)
+	finalText, err := r.agentLoop(ctx, &messages, toolSchemas, nil, r.Client)
 	return finalText, messages, err
 }
 
@@ -224,6 +251,7 @@ func (r *Runner) agentLoop(
 	messages *[]types.Message,
 	toolSchemas []types.ChatRequestTool,
 	emit channel.ReplyFunc,
+	client llm.ChatClient,
 ) (finalText string, err error) {
 	lifecycleCtx := plugin.AgentLifecycleContext{
 		AgentID:   r.AgentID,
@@ -240,6 +268,8 @@ func (r *Runner) agentLoop(
 
 	hadToolCalls := false
 	emptyRetries := 0
+	rateLimitBackoff := initialRateLimitBackoff
+	rateLimitStartedAt := time.Time{}
 	if r.lastUsageIndex == 0 {
 		r.lastUsageIndex = -1
 	}
@@ -250,10 +280,39 @@ func (r *Runner) agentLoop(
 			emptyRetries = 0
 		}
 
-		resp, err := r.Client.Chat(ctx, *messages, toolSchemas)
+		resp, err := client.Chat(ctx, *messages, toolSchemas)
 		if err != nil {
+			if errors.Is(err, llm.ErrRateLimited) {
+				now := time.Now()
+				if rateLimitStartedAt.IsZero() {
+					rateLimitStartedAt = now
+				}
+				if now.Sub(rateLimitStartedAt) >= maxRateLimitBackoff {
+					if emit != nil {
+						if emitErr := emit("I keep hitting the API rate limit. I retried with exponential backoff for 5 minutes and it still isn't through.\n"); emitErr != nil {
+							return "", emitErr
+						}
+					}
+					return "", err
+				}
+				fmt.Fprintf(os.Stderr, "[runner] API rate limited; backing off for %s\n", rateLimitBackoff)
+				select {
+				case <-ctx.Done():
+					return "", ctx.Err()
+				case <-time.After(rateLimitBackoff):
+					if rateLimitBackoff < maxRateLimitBackoff {
+						rateLimitBackoff *= 2
+						if rateLimitBackoff > maxRateLimitBackoff {
+							rateLimitBackoff = maxRateLimitBackoff
+						}
+					}
+					continue
+				}
+			}
 			return "", err
 		}
+		rateLimitBackoff = initialRateLimitBackoff
+		rateLimitStartedAt = time.Time{}
 
 		r.reportUsage(resp, emit)
 		if resp.Usage != nil {
@@ -526,6 +585,6 @@ func (r *Runner) DistillMemory(ctx context.Context) error {
 		{Role: "user", Content: channel.DistillInstruction},
 	}
 
-	_, err := r.agentLoop(ctx, &messages, toolSchemas, nil)
+	_, err := r.agentLoop(ctx, &messages, toolSchemas, nil, r.Client)
 	return err
 }

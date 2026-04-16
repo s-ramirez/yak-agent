@@ -140,14 +140,72 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: loading schedule store: %v\n", err)
 	}
+	// heartbeatCfg is non-nil when YAK_HEARTBEAT_INTERVAL is set and valid.
+	type heartbeatCfg struct {
+		interval    time.Duration
+		target      string // "cli" | "imessage" | "discord" | "none"
+		to          string // outbound recipient handle / channel ID
+		prompt      string
+		model       string // model override for heartbeat turns; "" = default
+		activeStart string // "HH:MM"
+		activeEnd   string // "HH:MM"
+		timezone    string // IANA, "" = local
+	}
+	type mealReminderCfg struct {
+		target string
+		to     string
+		model  string
+	}
+	var hbCfg *heartbeatCfg
+	var mealCfg mealReminderCfg
 	var scheduler *schedule.Scheduler
 	if scheduleStore != nil {
 		scheduler = schedule.NewScheduler(scheduleStore, 16)
+		mealCfg = mealReminderCfg{
+			target: os.Getenv("YAK_HEARTBEAT_TARGET"),
+			to:     os.Getenv("YAK_HEARTBEAT_TO"),
+			model:  os.Getenv("YAK_HEARTBEAT_MODEL"),
+		}
+		if mealCfg.target == "" {
+			mealCfg.target = "cli"
+		}
+		mealPrompt := "Meal check-in: review today's calorie tracker and ask only about the relevant missing meal for this schedule. At 9am ask about breakfast, at 2pm ask about lunch, at 8pm ask about dinner. If that meal is already logged or nothing is actionable, reply HEARTBEAT_OK."
+		// Meal reminders are scheduled separately from the generic heartbeat so
+		// the periodic heartbeat can stay focused on non-meal background work.
+		for _, reminder := range []struct {
+			name string
+			cron string
+		}{
+			{name: "meal-breakfast", cron: "0 9 * * *"},
+			{name: "meal-lunch", cron: "0 14 * * *"},
+			{name: "meal-dinner", cron: "0 20 * * *"},
+		} {
+			scheduler.Inject(schedule.Job{
+				Name:    reminder.name,
+				Enabled: true,
+				Schedule: schedule.Schedule{
+					Kind: schedule.KindCron,
+					Cron: reminder.cron,
+				},
+				Text: mealPrompt,
+			})
+		}
 		if interval := os.Getenv("YAK_HEARTBEAT_INTERVAL"); interval != "" {
 			d, err := time.ParseDuration(interval)
 			if err != nil || d <= 0 {
 				fmt.Fprintf(os.Stderr, "warning: invalid YAK_HEARTBEAT_INTERVAL %q, heartbeat disabled\n", interval)
 			} else {
+				hbPrompt := "Heartbeat tick: if there is nothing actionable, reply HEARTBEAT_OK."
+				hbCfg = &heartbeatCfg{
+					interval:    d,
+					target:      mealCfg.target,
+					to:          mealCfg.to,
+					prompt:      hbPrompt,
+					model:       mealCfg.model,
+					activeStart: os.Getenv("YAK_HEARTBEAT_ACTIVE_HOURS_START"),
+					activeEnd:   os.Getenv("YAK_HEARTBEAT_ACTIVE_HOURS_END"),
+					timezone:    os.Getenv("YAK_HEARTBEAT_TIMEZONE"),
+				}
 				now := time.Now()
 				scheduler.Inject(schedule.Job{
 					Name:    "heartbeat",
@@ -157,7 +215,7 @@ func main() {
 						Every:  schedule.Duration(d),
 						Anchor: &now,
 					},
-					Text: "Heartbeat tick: no user input. Continue any pending work, or wait for input if there is nothing to do.",
+					Text: hbPrompt,
 				})
 			}
 		}
@@ -361,22 +419,29 @@ func main() {
 
 	var userActivity bool
 	runner := cli.Runner{
-		Client:          chatClient,
-		Registry:        registry,
-		Skills:          skillsRegistry,
-		AfterTurnHooks:  afterTurnHooks,
-		AgentStartHooks: agentStartHooks,
-		AgentEndHooks:   agentEndHooks,
-		UsageHooks:      usageHooks,
-		PluginPrompts:   pluginPrompts,
-		AgentID:         "main",
-		AgentName:       "orchestrator",
-		Prompt:          agentPrompt,
-		ContextSize:     contextSize,
-		ContextFiles:    contextFiles,
-		MemoryStore:     memoryStore,
-		Scheduler:       scheduler,
-		Compaction:      compaction.DefaultSettings,
+		Client:           chatClient,
+		Registry:         registry,
+		Skills:           skillsRegistry,
+		AfterTurnHooks:   afterTurnHooks,
+		AgentStartHooks:  agentStartHooks,
+		AgentEndHooks:    agentEndHooks,
+		UsageHooks:       usageHooks,
+		PluginPrompts:    pluginPrompts,
+		AgentID:          "main",
+		AgentName:        "orchestrator",
+		Prompt:           agentPrompt,
+		ContextSize:      contextSize,
+		ContextFiles:     contextFiles,
+		MemoryStore:      memoryStore,
+		Scheduler:        scheduler,
+		Compaction:       compaction.DefaultSettings,
+		HeartbeatEnabled: hbCfg != nil,
+		ClientForModel: func(m string) llm.ChatClient {
+			return llm.NewClient(baseURL, m, &llm.Options{
+				Timeout: 300 * time.Second,
+				APIKey:  apiKey,
+			})
+		},
 	}
 
 	subagentManager, err := subagents.NewManager(
@@ -421,18 +486,70 @@ func main() {
 		defer scheduler.Stop()
 	}
 
-	channels := channel.NewRegistry()
-	channels.Register(clichannel.NewStdio(os.Stdin, os.Stdout))
-	if scheduler != nil {
-		channels.Register(&sched.Channel{
-			Scheduler: scheduler,
-			Target:    channel.Key{Channel: clichannel.Name, Thread: clichannel.DefaultThread},
-		})
+	// Create messaging channel instances first so heartbeat delivery can
+	// reference them when wiring up the sched channel.
+	var imsgChannel *imessagechannel.Channel
+	if imsgCfg != nil {
+		imsgChannel = imessagechannel.New(*imsgCfg)
+	}
+	var discordChannel *discordchannel.Channel
+	if discordCfg != nil {
+		discordChannel = discordchannel.New(*discordCfg)
 	}
 
-	// iMessage via BlueBubbles — register channel if config was parsed successfully.
-	if imsgCfg != nil {
-		channels.Register(imessagechannel.New(*imsgCfg))
+	channels := channel.NewRegistry()
+	cliCh := clichannel.NewStdio(os.Stdin, os.Stdout)
+	channels.Register(cliCh)
+	if scheduler != nil {
+		schedCh := &sched.Channel{
+			Scheduler: scheduler,
+			Target:    channel.Key{Channel: clichannel.Name, Thread: clichannel.DefaultThread},
+		}
+		if hbCfg != nil {
+			delivery := &sched.HeartbeatDelivery{
+				Target:      hbCfg.target,
+				Model:       hbCfg.model,
+				ActiveStart: hbCfg.activeStart,
+				ActiveEnd:   hbCfg.activeEnd,
+				Timezone:    hbCfg.timezone,
+			}
+			// CLISend wraps the CLI channel for heartbeat replies routed to terminal.
+			delivery.CLISend = func(ctx context.Context, content string) error {
+				return cliCh.Send(ctx, channel.Outbound{
+					Channel: clichannel.Name,
+					Thread:  clichannel.DefaultThread,
+					Content: content,
+				})
+			}
+			// OutboundSend delivers to the configured messaging channel.
+			switch hbCfg.target {
+			case "imessage":
+				if imsgChannel != nil && hbCfg.to != "" {
+					ch, to := imsgChannel, hbCfg.to
+					delivery.OutboundSend = func(ctx context.Context, content string) error {
+						return ch.Send(ctx, channel.Outbound{Channel: "imessage", Thread: to, Content: content})
+					}
+				} else {
+					fmt.Fprintf(os.Stderr, "warning: heartbeat target=imessage but iMessage not configured or YAK_HEARTBEAT_TO not set\n")
+				}
+			case "discord":
+				if discordChannel != nil && hbCfg.to != "" {
+					ch, to := discordChannel, hbCfg.to
+					delivery.OutboundSend = func(ctx context.Context, content string) error {
+						return ch.Send(ctx, channel.Outbound{Channel: "discord", Thread: to, Content: content})
+					}
+				} else {
+					fmt.Fprintf(os.Stderr, "warning: heartbeat target=discord but Discord not configured or YAK_HEARTBEAT_TO not set\n")
+				}
+			}
+			schedCh.Heartbeat = delivery
+		}
+		channels.Register(schedCh)
+	}
+
+	// Register messaging channels (instances were created above).
+	if imsgChannel != nil {
+		channels.Register(imsgChannel)
 		webhookPath := imsgCfg.WebhookPath
 		if webhookPath == "" {
 			webhookPath = "/bluebubbles"
@@ -440,10 +557,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "iMessage channel enabled (webhook :%d%s)\n",
 			imsgCfg.WebhookPort, webhookPath)
 	}
-
-	// Discord — register channel if a token was provided.
-	if discordCfg != nil {
-		channels.Register(discordchannel.New(*discordCfg))
+	if discordChannel != nil {
+		channels.Register(discordChannel)
 		fmt.Fprintf(os.Stderr, "Discord channel enabled (owners=%d, tag=%q)\n",
 			len(discordCfg.OwnerIDs), discordCfg.GuildTag)
 	}

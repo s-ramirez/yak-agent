@@ -84,9 +84,10 @@ func TestWebhookHandler_NonOwnerDropped(t *testing.T) {
 
 func TestWebhookHandler_OwnerDMForwarded(t *testing.T) {
 	ch := New(Config{
-		ServerURL:    "http://localhost",
-		Password:     "secret",
-		OwnerHandles: []string{"+15551234567"},
+		ServerURL:     "http://localhost",
+		Password:      "secret",
+		OwnerHandles:  []string{"+15551234567"},
+		DebounceDelay: 50 * time.Millisecond,
 	})
 	out := make(chan channel.Inbound, 4)
 	handler := ch.makeHandler(context.Background(), out)
@@ -138,10 +139,11 @@ func TestWebhookHandler_FromMeDropped(t *testing.T) {
 
 func TestWebhookHandler_GroupRequiresTag(t *testing.T) {
 	ch := New(Config{
-		ServerURL:    "http://localhost",
-		Password:     "secret",
-		OwnerHandles: []string{"+15551234567"},
-		GroupTag:     "@yak",
+		ServerURL:     "http://localhost",
+		Password:      "secret",
+		OwnerHandles:  []string{"+15551234567"},
+		GroupTag:      "@yak",
+		DebounceDelay: 50 * time.Millisecond,
 	})
 	out := make(chan channel.Inbound, 4)
 	handler := ch.makeHandler(context.Background(), out)

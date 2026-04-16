@@ -87,9 +87,25 @@ func runInit(args []string) error {
 	}
 
 	fmt.Fprintln(out, "\n== Heartbeat ==")
-	fmt.Fprintln(out, "Periodic tick that wakes the agent with no user input (Go duration syntax).")
+	fmt.Fprintln(out, "Periodic tick that wakes the agent on a fixed interval.")
+	fmt.Fprintln(out, "The agent can respond with HEARTBEAT_OK to suppress output and keep context clean.")
 	if promptYesNo(reader, out, "Enable heartbeat?", false) {
 		ask("YAK_HEARTBEAT_INTERVAL", "Interval (e.g. 10m, 1h)", "15m")
+		ask("YAK_HEARTBEAT_MODEL", "Model override for heartbeat turns (blank = same as default)", "")
+		fmt.Fprintln(out, "  Target: where to deliver non-empty heartbeat replies.")
+		fmt.Fprintln(out, "    cli      — print to terminal (default)")
+		fmt.Fprintln(out, "    none     — run silently, no output")
+		fmt.Fprintln(out, "    imessage — send to an iMessage handle (requires iMessage channel)")
+		fmt.Fprintln(out, "    discord  — send to a Discord channel/user (requires Discord channel)")
+		ask("YAK_HEARTBEAT_TARGET", "Delivery target", "cli")
+		ask("YAK_HEARTBEAT_TO", "Recipient handle or channel ID (leave blank for cli/none)", "")
+		fmt.Fprintln(out, "  Optional prompt override: leave blank to use the built-in meal check-in behavior.")
+		ask("YAK_HEARTBEAT_PROMPT", "Prompt override", "")
+		if promptYesNo(reader, out, "Restrict to active hours?", false) {
+			ask("YAK_HEARTBEAT_ACTIVE_HOURS_START", "Active hours start (HH:MM, 24h)", "09:00")
+			ask("YAK_HEARTBEAT_ACTIVE_HOURS_END", "Active hours end   (HH:MM, 24h)", "22:00")
+			ask("YAK_HEARTBEAT_TIMEZONE", "Timezone (IANA, e.g. America/New_York; blank = local)", "")
+		}
 	}
 
 	fmt.Fprintln(out, "\n== iMessage channel (BlueBubbles) ==")

@@ -12,6 +12,11 @@ import (
 type Conversation struct {
 	Key      Key
 	Messages []types.Message
+
+	// ModelOverride, if non-empty, is set by the dispatcher from the
+	// inbound message and cleared after the turn. The turn handler may
+	// use it to switch models for a single turn (e.g. heartbeat runs).
+	ModelOverride string
 }
 
 // Store is an in-memory map of conversations keyed by (channel, thread).

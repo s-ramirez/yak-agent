@@ -16,6 +16,9 @@ Run the CLI: `go run ./cmd/yak` (requires an OpenAI-compatible API, defaults to 
 
 Environment variables: `YAK_BASE_URL` (API endpoint), `YAK_MODEL` (model name, default `"default"`).
 
+Heartbeat environment variables (all optional; heartbeat is disabled unless `YAK_HEARTBEAT_INTERVAL` is set):
+`YAK_HEARTBEAT_INTERVAL` (Go duration, e.g. `15m`), `YAK_HEARTBEAT_TARGET` (default `cli`; `cli` | `imessage` | `discord` | `none`), `YAK_HEARTBEAT_TO` (recipient handle/channel ID for non-CLI targets), `YAK_HEARTBEAT_MODEL` (model override for heartbeat turns; empty = same as default), `YAK_HEARTBEAT_PROMPT` (custom prompt text), `YAK_HEARTBEAT_ACTIVE_HOURS_START` / `YAK_HEARTBEAT_ACTIVE_HOURS_END` (`HH:MM` 24h window; both must be set), `YAK_HEARTBEAT_TIMEZONE` (IANA name; empty = local). When the model has nothing to report it should respond with `HEARTBEAT_OK` — this suppresses delivery and prunes the turn from history.
+
 iMessage channel environment variables (all optional; channel is disabled unless both URL and password are set):
 `YAK_IMESSAGE_ENABLED` (default `true`; set to `false`/`0` to force-disable even when creds are present), `YAK_IMESSAGE_SERVER_URL`, `YAK_IMESSAGE_PASSWORD`, `YAK_IMESSAGE_WEBHOOK_PORT` (default `8421`), `YAK_IMESSAGE_WEBHOOK_PATH` (default `/bluebubbles`), `YAK_IMESSAGE_OWNER_HANDLES` (comma-separated), `YAK_IMESSAGE_GROUP_TAG` (e.g. `@yak`).
 
@@ -36,7 +39,9 @@ Discord channel environment variables (channel is disabled unless `YAK_DISCORD_T
 
 **System prompt** (`internal/prompt/system.go`): `BuildSystemPrompt(tools, skills, env)` assembles the prompt from sections: environment info (OS, arch, workspace, time), per-tool guidelines, conditional tool-selection rules, and an `<available_skills>` XML block listing visible skills with their name, description, and file location.
 
-**LLM client** (`internal/llm/client.go`): `ChatClient` interface with a single `Chat()` method. The concrete `Client` posts to `/v1/chat/completions` (OpenAI-compatible format).
+**LLM client** (`internal/llm/client.go`): `ChatClient` interface with a single `Chat()` method. The concrete `Client` posts to `/v1/chat/completions` (OpenAI-compatible format). The runner accepts a `ClientForModel func(model string) ChatClient` factory for per-turn model overrides (used by heartbeat).
+
+**Heartbeat system** (`internal/heartbeat/`, `internal/channel/sched/`): `HeartbeatDelivery` on `sched.Channel` adds active-hours gating, `HEARTBEAT_OK` token suppression (prunes the turn from history), outbound routing to iMessage/Discord/none, 24 h duplicate suppression, and per-turn model override. `channel.Inbound` carries `InterceptReply` (reply routing hook) and `ModelOverride` (per-turn model); `channel.Conversation` carries `ModelOverride` set by the dispatcher for the duration of each turn.
 
 **Channel interface** (`internal/channel/channel.go`): `Channel` has `Name() string`, `Listen(ctx, out chan<- Inbound) error`, and `Send(ctx, Outbound) error`. The `Dispatcher` fans out to all registered channels, routes each inbound message to a conversation keyed by `(Channel, Thread)`, and calls back `Send` on the originating channel with the reply.
 

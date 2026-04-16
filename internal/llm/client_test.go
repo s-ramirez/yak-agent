@@ -138,3 +138,20 @@ func TestClientChatReturnsDecodeErrorForInvalidJSON(t *testing.T) {
 		t.Fatal("expected decode error")
 	}
 }
+
+func TestClientErrorIsRateLimitedOn429(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"rate limit"}}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-model", nil)
+	_, err := client.Chat(context.Background(), nil, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+}

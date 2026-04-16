@@ -67,3 +67,4 @@ func (w *WebUI) OnUsage(ctx plugin.AgentLifecycleContext, usage *types.Usage, co
 		ContextSize:  contextSize,
 	})
 }
+

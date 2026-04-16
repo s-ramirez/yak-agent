@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,8 +35,14 @@ type ClientError struct {
 	Body   string
 }
 
+var ErrRateLimited = errors.New("llm rate limited")
+
 func (e *ClientError) Error() string {
 	return fmt.Sprintf("API error (%d): %s", e.Status, e.Body)
+}
+
+func (e *ClientError) Is(target error) bool {
+	return target == ErrRateLimited && e.Status == http.StatusTooManyRequests
 }
 
 func NewClient(baseURL, model string, opts *Options) *Client {

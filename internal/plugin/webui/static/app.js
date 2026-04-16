@@ -439,6 +439,65 @@ function getOrCreateAgent(id, name) {
 
 const logEl = document.getElementById('log');
 const statusEl = document.getElementById('status');
+const sessionTotalTokensEl = document.getElementById('session-total-tokens');
+const sessionAgentCountEl = document.getElementById('session-agent-count');
+const agentStatsEl = document.getElementById('agent-stats');
+const tokenStats = new Map();
+
+function getTokenStat(id, name) {
+    if (!tokenStats.has(id)) {
+        tokenStats.set(id, {
+            id,
+            name: name || id,
+            calls: 0,
+            totalTokens: 0,
+            promptTokens: 0,
+            contextSize: 0,
+        });
+    }
+    const stat = tokenStats.get(id);
+    if (name) stat.name = name;
+    return stat;
+}
+
+function formatNumber(n) {
+    return new Intl.NumberFormat().format(n || 0);
+}
+
+function renderDashboard() {
+    let sessionTotal = 0;
+    const rows = Array.from(tokenStats.values())
+        .sort((a, b) => b.totalTokens - a.totalTokens || a.name.localeCompare(b.name));
+
+    for (const row of rows) {
+        sessionTotal += row.totalTokens;
+    }
+
+    sessionTotalTokensEl.textContent = formatNumber(sessionTotal);
+    sessionAgentCountEl.textContent = formatNumber(rows.length);
+
+    agentStatsEl.innerHTML = '';
+    for (const row of rows) {
+        const pct = row.contextSize > 0
+            ? Math.round((row.promptTokens / row.contextSize) * 100)
+            : null;
+        const el = document.createElement('div');
+        el.className = 'agent-stat';
+        el.innerHTML = `
+            <div class="agent-stat-header">
+                <span class="agent-stat-name">${row.name}</span>
+                <span class="agent-stat-total">${formatNumber(row.totalTokens)} tok</span>
+            </div>
+            <div class="agent-stat-meta">
+                <span>Calls <strong>${formatNumber(row.calls)}</strong></span>
+                <span>Last prompt <strong>${formatNumber(row.promptTokens)}</strong></span>
+                <span>Context <strong>${row.contextSize > 0 ? formatNumber(row.contextSize) : '—'}</strong></span>
+                <span>Usage <strong>${pct === null ? '—' : pct + '%'}</strong></span>
+            </div>
+        `;
+        agentStatsEl.appendChild(el);
+    }
+}
 
 function addLogEntry(ev) {
     const entry = document.createElement('div');
@@ -513,6 +572,7 @@ function handleEvent(ev) {
         }
         case 'agent_start': {
             getOrCreateAgent(ev.agent_id, ev.agent_name);
+            getTokenStat(ev.agent_id, ev.agent_name);
             break;
         }
         case 'agent_end': {
@@ -525,10 +585,17 @@ function handleEvent(ev) {
             const agent = getOrCreateAgent(ev.agent_id, ev.agent_name);
             agent.promptTokens = ev.prompt_tokens || 0;
             agent.contextSize = ev.context_size || 0;
+
+            const stat = getTokenStat(ev.agent_id, ev.agent_name);
+            stat.calls += 1;
+            stat.totalTokens += ev.total_tokens || 0;
+            stat.promptTokens = ev.prompt_tokens || 0;
+            stat.contextSize = ev.context_size || 0;
             break;
         }
     }
     addLogEntry(ev);
+    renderDashboard();
 }
 
 // ── SSE connection ───────────────────────────────────────────────────
@@ -565,6 +632,8 @@ async function main() {
     window.addEventListener('resize', resizeCanvas);
 
     getOrCreateAgent('main', 'orchestrator');
+    getTokenStat('main', 'orchestrator');
+    renderDashboard();
 
     requestAnimationFrame(gameLoop);
     connect();

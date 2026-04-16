@@ -19,6 +19,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"yak-go/internal/channel"
@@ -52,11 +53,28 @@ type Config struct {
 	// agent to respond. Leave empty to respond to all group messages from
 	// owner handles (not recommended).
 	GroupTag string
+
+	// DebounceDelay overrides the default 10-second wait used to group
+	// consecutive messages before dispatching. Zero uses the default.
+	DebounceDelay time.Duration
 }
+
+// msgPart is a single inbound message fragment waiting to be debounced.
+type msgPart struct {
+	text   string
+	sender string
+}
+
+// defaultDebounceDelay is how long to wait for follow-up messages before dispatching.
+const defaultDebounceDelay = 10 * time.Second
 
 // Channel implements channel.Channel for iMessage via BlueBubbles.
 type Channel struct {
-	cfg Config
+	cfg     Config
+	seenMu  sync.Mutex
+	seenIDs map[string]struct{} // message GUIDs already dispatched this session
+	pendMu  sync.Mutex
+	pending map[string]chan msgPart // per-thread debounce channels
 }
 
 // New returns a new Channel with the given configuration.
@@ -73,7 +91,11 @@ func New(cfg Config) *Channel {
 		normalized = append(normalized, normalizeHandle(h))
 	}
 	cfg.OwnerHandles = normalized
-	return &Channel{cfg: cfg}
+	return &Channel{
+		cfg:     cfg,
+		seenIDs: make(map[string]struct{}),
+		pending: make(map[string]chan msgPart),
+	}
 }
 
 func (c *Channel) Name() string { return channelName }
@@ -187,6 +209,22 @@ func (c *Channel) makeHandler(ctx context.Context, out chan<- channel.Inbound) h
 			return
 		}
 
+		// Deduplicate: BlueBubbles replays recent messages on reconnect.
+		// Drop any message whose GUID we have already dispatched this session.
+		if guid := payload.messageGUID(); guid != "" {
+			c.seenMu.Lock()
+			_, already := c.seenIDs[guid]
+			if !already {
+				c.seenIDs[guid] = struct{}{}
+			}
+			c.seenMu.Unlock()
+			if already {
+				log("webhook: dropped duplicate message guid=%s", guid)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+		}
+
 		text := payload.text()
 		if text == "" {
 			log("webhook: dropped message with empty text")
@@ -242,22 +280,76 @@ func (c *Channel) makeHandler(ctx context.Context, out chan<- channel.Inbound) h
 		}
 
 		log("webhook: accepted message from %q (chat=%s, group=%v): %q", sender, chatGUID, isGroup, text)
-
-		msg := channel.Inbound{
-			Channel:    channelName,
-			Thread:     chatGUID,
-			Sender:     sender,
-			Content:    text,
-			Kind:       channel.KindUser,
-			ReceivedAt: time.Now(),
-		}
-
-		select {
-		case <-ctx.Done():
-		case out <- msg:
-		}
-
+		c.enqueue(ctx, chatGUID, sender, text, out)
 		w.WriteHeader(http.StatusOK)
+	}
+}
+
+// enqueue routes an inbound message through the per-thread debounce worker.
+// Messages that arrive within debounceDelay of each other are accumulated and
+// dispatched as a single combined message.
+func (c *Channel) enqueue(ctx context.Context, chatGUID, sender, text string, out chan<- channel.Inbound) {
+	c.pendMu.Lock()
+	ch, exists := c.pending[chatGUID]
+	if !exists {
+		ch = make(chan msgPart, 16)
+		c.pending[chatGUID] = ch
+		go c.debounceWorker(ctx, chatGUID, ch, out)
+	}
+	c.pendMu.Unlock()
+
+	select {
+	case ch <- msgPart{text: text, sender: sender}:
+	case <-ctx.Done():
+	}
+}
+
+func (c *Channel) debounce() time.Duration {
+	if c.cfg.DebounceDelay > 0 {
+		return c.cfg.DebounceDelay
+	}
+	return defaultDebounceDelay
+}
+
+// debounceWorker accumulates message parts for chatGUID, then dispatches them
+// as a single Inbound after the configured debounce delay of silence.
+func (c *Channel) debounceWorker(ctx context.Context, chatGUID string, ch <-chan msgPart, out chan<- channel.Inbound) {
+	defer func() {
+		c.pendMu.Lock()
+		if c.pending[chatGUID] == ch {
+			delete(c.pending, chatGUID)
+		}
+		c.pendMu.Unlock()
+	}()
+
+	var parts []string
+	var sender string
+	var timer <-chan time.Time
+
+	for {
+		select {
+		case part := <-ch:
+			if sender == "" {
+				sender = part.sender
+			}
+			parts = append(parts, part.text)
+			timer = time.After(c.debounce())
+		case <-timer:
+			select {
+			case <-ctx.Done():
+			case out <- channel.Inbound{
+				Channel:    channelName,
+				Thread:     chatGUID,
+				Sender:     sender,
+				Content:    strings.Join(parts, "\n"),
+				Kind:       channel.KindUser,
+				ReceivedAt: time.Now(),
+			}:
+			}
+			return
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
@@ -307,6 +399,7 @@ type webhookPayload struct {
 }
 
 type messageData struct {
+	GUID     string          `json:"guid"`
 	Text     string          `json:"text"`
 	IsFromMe bool            `json:"isFromMe"`
 	FromMe   bool            `json:"from_me"`
@@ -336,6 +429,15 @@ func (p *webhookPayload) message() *messageData {
 		return nil
 	}
 	return &m
+}
+
+// messageGUID returns the unique identifier of the message, used for
+// deduplication when BlueBubbles replays recent messages on reconnect.
+func (p *webhookPayload) messageGUID() string {
+	if m := p.message(); m != nil {
+		return m.GUID
+	}
+	return ""
 }
 
 func (p *webhookPayload) fromMe() bool {
