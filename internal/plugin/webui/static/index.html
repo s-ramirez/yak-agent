@@ -11,8 +11,24 @@
         <canvas id="room"></canvas>
         <div id="sidebar">
             <div id="status">Connecting...</div>
-            <h3>Event Log</h3>
-            <div id="log"></div>
+            <section class="panel" id="dashboard-panel">
+                <h3>Token Dashboard</h3>
+                <div id="dashboard-summary">
+                    <div class="metric">
+                        <span class="metric-label">Session total</span>
+                        <span class="metric-value" id="session-total-tokens">0</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">Agents</span>
+                        <span class="metric-value" id="session-agent-count">0</span>
+                    </div>
+                </div>
+                <div id="agent-stats"></div>
+            </section>
+            <section class="panel panel-fill">
+                <h3>Event Log</h3>
+                <div id="log"></div>
+            </section>
         </div>
     </div>
     <script src="app.js"></script>

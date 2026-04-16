@@ -318,6 +318,45 @@ func TestScheduleWakeMissingText(t *testing.T) {
 	}
 }
 
+func TestScheduleAddCronAtSpecificLocalTimes(t *testing.T) {
+	tool, store := newScheduleTool(t)
+
+	cases := []struct {
+		name string
+		cron string
+	}{
+		{name: "breakfast", cron: "0 9 * * *"},
+		{name: "lunch", cron: "0 14 * * *"},
+		{name: "dinner", cron: "0 20 * * *"},
+	}
+
+	for _, tc := range cases {
+		res := runTool(t, tool, ScheduleParams{
+			Action: "add",
+			Name:   tc.name,
+			Kind:   "cron",
+			Cron:   tc.cron,
+			Text:   "meal check",
+		})
+		if res.IsError {
+			t.Fatalf("unexpected error for %s: %s", tc.name, res.Output)
+		}
+	}
+
+	jobs := store.List()
+	if len(jobs) != 3 {
+		t.Fatalf("expected 3 cron jobs, got %+v", jobs)
+	}
+	for _, job := range jobs {
+		if job.Schedule.Kind != schedule.KindCron {
+			t.Fatalf("expected cron job, got %+v", job)
+		}
+		if job.NextRunAt == nil {
+			t.Fatalf("expected NextRunAt for %s", job.Name)
+		}
+	}
+}
+
 func TestScheduleEmptyAction(t *testing.T) {
 	tool, _ := newScheduleTool(t)
 	res := runTool(t, tool, ScheduleParams{})

@@ -24,7 +24,7 @@ body {
 }
 
 #sidebar {
-    width: 280px;
+    width: 320px;
     background: #0f3460;
     padding: 12px;
     display: flex;
@@ -58,8 +58,99 @@ body {
     letter-spacing: 1px;
 }
 
+.panel {
+    background: rgba(9, 18, 44, 0.45);
+    border: 1px solid rgba(165, 180, 252, 0.18);
+    border-radius: 6px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.panel-fill {
+    flex: 1;
+    min-height: 0;
+}
+
+#dashboard-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.metric {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 6px;
+    padding: 8px;
+}
+
+.metric-label {
+    display: block;
+    color: #9db4ff;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 4px;
+}
+
+.metric-value {
+    color: #f8fafc;
+    font-size: 18px;
+    font-weight: bold;
+}
+
+#agent-stats {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 280px;
+    overflow-y: auto;
+}
+
+.agent-stat {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 6px;
+    padding: 8px;
+}
+
+.agent-stat-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.agent-stat-name {
+    color: #a5b4fc;
+    font-size: 12px;
+    font-weight: bold;
+}
+
+.agent-stat-total {
+    color: #ffd166;
+    font-size: 12px;
+    font-weight: bold;
+}
+
+.agent-stat-meta {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px 8px;
+    font-size: 11px;
+    color: #cbd5e1;
+}
+
+.agent-stat-meta span strong {
+    color: #f8fafc;
+}
+
 #log {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
     font-size: 11px;
     line-height: 1.6;

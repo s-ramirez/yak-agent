@@ -6,9 +6,11 @@ package sched
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"yak-go/internal/channel"
+	"yak-go/internal/heartbeat"
 	"yak-go/internal/schedule"
 )
 
@@ -19,12 +21,104 @@ import (
 // own.
 const Name = "sched"
 
+// HeartbeatDelivery configures how the heartbeat job's replies are
+// handled. When set on a Channel, all heartbeat events gain:
+//
+//   - Active-hours gating: ticks outside the configured window are
+//     dropped before they reach the dispatcher.
+//   - HEARTBEAT_OK suppression: if the model returns only the sentinel
+//     token the turn is pruned from conversation history and nothing is
+//     delivered.
+//   - Outbound routing: non-empty replies are sent to the configured
+//     target channel instead of (or instead of only) the CLI.
+//   - Duplicate suppression: identical replies within 24 h are silently
+//     dropped on non-CLI targets.
+type HeartbeatDelivery struct {
+	// Target controls where non-empty, non-token replies are delivered.
+	//   "cli"      – delivered via CLISend (default / legacy behavior)
+	//   "none"     – silently discarded; agent still runs
+	//   any other  – delivered via OutboundSend (e.g. "imessage", "discord")
+	Target string
+
+	// ActiveStart and ActiveEnd are "HH:MM" strings (24-hour) that define
+	// the window during which heartbeat ticks are allowed to fire. An empty
+	// string for either disables the gate (always active).
+	ActiveStart string
+	ActiveEnd   string
+	// Timezone is an IANA location name for active-hours comparisons.
+	// Empty means local system time.
+	Timezone string
+
+	// Model, if non-empty, overrides the LLM model used for heartbeat turns.
+	Model string
+
+	// CLISend delivers the reply to the terminal. Called when Target=="cli".
+	// Typically wraps cliChannel.Send.
+	CLISend func(ctx context.Context, content string) error
+
+	// OutboundSend delivers the reply to an external channel. Called when
+	// Target is neither "cli" nor "none".
+	OutboundSend func(ctx context.Context, content string) error
+
+	mu       sync.Mutex
+	lastText string
+	lastAt   time.Time
+}
+
+// intercept is the InterceptReply function attached to heartbeat Inbound
+// messages. It performs HEARTBEAT_OK detection, dedup, and routing.
+func (h *HeartbeatDelivery) intercept(ctx context.Context, content string) (pruneLastTurn bool, err error) {
+	// HEARTBEAT_OK → prune this turn from conversation history.
+	if heartbeat.IsOnlyToken(content) {
+		return true, nil
+	}
+
+	// Deduplicate identical replies within 24 h (non-CLI targets only).
+	target := h.Target
+	if target != "cli" && target != "" {
+		h.mu.Lock()
+		isDup := content == h.lastText && !h.lastAt.IsZero() && time.Since(h.lastAt) < 24*time.Hour
+		h.mu.Unlock()
+		if isDup {
+			return false, nil
+		}
+	}
+
+	// Route the reply.
+	switch target {
+	case "", "cli":
+		if h.CLISend != nil {
+			err = h.CLISend(ctx, content)
+		}
+	case "none":
+		// intentionally silent
+	default: // "imessage", "discord", etc.
+		if h.OutboundSend != nil {
+			err = h.OutboundSend(ctx, content)
+		}
+	}
+
+	// Record last delivered text for future dedup (non-CLI targets only).
+	if err == nil && target != "cli" && target != "" {
+		h.mu.Lock()
+		h.lastText = content
+		h.lastAt = time.Now()
+		h.mu.Unlock()
+	}
+	return false, err
+}
+
 // Channel wraps a schedule.Scheduler. Events fired by the scheduler are
 // formatted as <scheduled_event> XML blocks and pushed onto the inbound
 // bus with Kind=KindEvent, addressed to Target.
 type Channel struct {
 	Scheduler *schedule.Scheduler
 	Target    channel.Key
+
+	// Heartbeat, if non-nil, enables the enhanced heartbeat delivery
+	// pipeline (active-hours gating, HEARTBEAT_OK suppression, outbound
+	// routing, dedup) for events named "heartbeat".
+	Heartbeat *HeartbeatDelivery
 }
 
 func (c *Channel) Name() string { return Name }
@@ -44,6 +138,16 @@ func (c *Channel) Listen(ctx context.Context, out chan<- channel.Inbound) error 
 			if !ok {
 				return nil
 			}
+
+			// Heartbeat-specific pre-flight: active-hours gate.
+			if (ev.Name == "heartbeat") && c.Heartbeat != nil {
+				hb := c.Heartbeat
+				if !heartbeat.IsWithinActiveHours(hb.ActiveStart, hb.ActiveEnd, hb.Timezone, time.Now()) {
+					// Outside active window — skip this tick silently.
+					continue
+				}
+			}
+
 			msg := channel.Inbound{
 				Channel:    c.Target.Channel,
 				Thread:     c.Target.Thread,
@@ -52,6 +156,13 @@ func (c *Channel) Listen(ctx context.Context, out chan<- channel.Inbound) error 
 				Kind:       channel.KindEvent,
 				ReceivedAt: time.Now(),
 			}
+
+			// Attach the intercept hook and optional model override for heartbeat and meal reminder events.
+			if (ev.Name == "heartbeat") && c.Heartbeat != nil {
+				msg.InterceptReply = c.Heartbeat.intercept
+				msg.ModelOverride = c.Heartbeat.Model
+			}
+
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
