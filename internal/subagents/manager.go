@@ -258,13 +258,21 @@ func (m *Manager) buildRuntime(def Definition) (*tools.Registry, []string, runti
 		}
 	}
 
-	selectedTools := make([]tools.Tool, 0, len(def.Tools))
-	for _, name := range def.Tools {
-		tool, ok := allTools[name]
-		if !ok {
-			return nil, nil, runtimeHooks{}, fmt.Errorf("unknown tool %q", name)
+	var selectedTools []tools.Tool
+	if len(def.Tools) == 1 && def.Tools[0] == "*" {
+		selectedTools = make([]tools.Tool, 0, len(allTools))
+		for _, tool := range allTools {
+			selectedTools = append(selectedTools, tool)
 		}
-		selectedTools = append(selectedTools, tool)
+	} else {
+		selectedTools = make([]tools.Tool, 0, len(def.Tools))
+		for _, name := range def.Tools {
+			tool, ok := allTools[name]
+			if !ok {
+				return nil, nil, runtimeHooks{}, fmt.Errorf("unknown tool %q", name)
+			}
+			selectedTools = append(selectedTools, tool)
+		}
 	}
 
 	registry := tools.NewRegistry(selectedTools...)

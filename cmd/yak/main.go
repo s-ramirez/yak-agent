@@ -630,6 +630,9 @@ func nameSet(names []string) map[string]struct{} {
 }
 
 func filterTools(in []tools.Tool, allowed map[string]struct{}) []tools.Tool {
+	if _, ok := allowed["*"]; ok {
+		return in
+	}
 	filtered := in[:0]
 	for _, t := range in {
 		if _, ok := allowed[t.Definition().Name]; ok {

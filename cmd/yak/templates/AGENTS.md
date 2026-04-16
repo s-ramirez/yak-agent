@@ -3,7 +3,7 @@ model: gpt-5.4
 base_url: https://api.openai.com
 api_key_env: OPENAI_API_KEY
 context_size: 400000
-tools: [read, write, edit, bash, grep, ls, find]
+tools: ["*"]
 ---
 
 # Repository Guidelines
