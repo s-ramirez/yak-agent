@@ -137,6 +137,24 @@ func main() {
 
 	memoryStore := memory.NewStore(filepath.Join(cwd, ".yak", "memory"))
 
+	// Per-(channel, thread) isolation for non-CLI channels. CLI and sched
+	// keep the shared project workspace + memory; discord/imessage/etc
+	// get their own workspace dir and memory dir provisioned on first
+	// inbound message.
+	yakStateDir := filepath.Join(cwd, ".yak", "state")
+	yakWorkspacesDir := filepath.Join(cwd, ".yak", "workspaces")
+	yakMemoryDir := filepath.Join(cwd, ".yak", "memory")
+	provisioner := &threadProvisioner{
+		exempt:         map[string]bool{clichannel.Name: true, sched.Name: true},
+		workspacesRoot: yakWorkspacesDir,
+		memoryRoot:     yakMemoryDir,
+	}
+	convStore := channel.NewPersistentStore(yakStateDir, provisioner)
+
+	// runnerRef is populated after the Runner is constructed; the memory
+	// tool closes over it to route each call to the turn's active store.
+	var runnerRef *cli.Runner
+
 	scheduleStore, err := schedule.NewStore(filepath.Join(cwd, ".yak", "schedule"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: loading schedule store: %v\n", err)
@@ -176,7 +194,12 @@ func main() {
 		tools.NewFindTool(searchDelegationGuidelines...),
 		tools.NewWebFetchTool(),
 		tools.NewWebSearchTool(),
-		tools.NewMemoryTool(memoryStore),
+		tools.NewMemoryToolResolving(func() *memory.Store {
+			if runnerRef != nil {
+				return runnerRef.ActiveMemoryStore()
+			}
+			return memoryStore
+		}, memoryStore),
 	}
 	if scheduleStore != nil {
 		builtinTools = append(builtinTools, tools.NewScheduleTool(scheduleStore))
@@ -359,6 +382,8 @@ func main() {
 		},
 	}
 
+	runnerRef = &runner
+
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	defer cancelRun()
 	if scheduler != nil {
@@ -445,7 +470,7 @@ func main() {
 
 	dispatcher := &channel.Dispatcher{
 		Channels:    channels,
-		Store:       channel.NewStore(),
+		Store:       convStore,
 		Commands:    &channel.CommandExpander{Skills: skillsRegistry},
 		Handler:     &runner,
 		OnUserInput: func() { userActivity = true },
@@ -585,6 +610,52 @@ func loadContextFiles(dirs []string, names ...string) []prompt.ContextFile {
 		}
 	}
 	return result
+}
+
+// threadProvisioner allocates per-(channel, thread) workspaces and
+// memory stores on first sighting. Channels listed in exempt are
+// left untouched: their conversations share the process cwd and the
+// project-level memory store.
+type threadProvisioner struct {
+	exempt         map[string]bool
+	workspacesRoot string
+	memoryRoot     string
+}
+
+func (p *threadProvisioner) Provision(k channel.Key) (string, *memory.Store, error) {
+	if p.exempt[k.Channel] {
+		return "", nil, nil
+	}
+	thread := sanitizePathSegment(k.Thread)
+	ch := sanitizePathSegment(k.Channel)
+	if thread == "" || ch == "" {
+		return "", nil, nil
+	}
+	ws := filepath.Join(p.workspacesRoot, ch, thread)
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		return "", nil, err
+	}
+	memDir := filepath.Join(p.memoryRoot, ch, thread)
+	return ws, memory.NewStore(memDir), nil
+}
+
+func sanitizePathSegment(s string) string {
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 func formatParams(params json.RawMessage) string {

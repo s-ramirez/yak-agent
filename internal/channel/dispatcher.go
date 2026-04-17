@@ -83,8 +83,9 @@ func (d *Dispatcher) process(ctx context.Context, in Inbound) {
 	// conversation. If the command carries a trailing body, fall through
 	// and treat that body as the first user message of the fresh session.
 	if matched, tail := ParseResetCommand(in.Content); matched {
-		conv := d.Store.Get(Key{Channel: in.Channel, Thread: in.Thread})
-		conv.Messages = nil
+		key := Key{Channel: in.Channel, Thread: in.Thread}
+		d.Store.Get(key) // ensure provisioned
+		d.Store.Reset(key)
 		if tail == "" {
 			d.replyText(ctx, in.Channel, in.Thread, "New conversation started.\n")
 			return
@@ -136,6 +137,10 @@ func (d *Dispatcher) process(ctx context.Context, in Inbound) {
 		} else {
 			_ = reply(fmt.Sprintf("error: %v\n", err))
 		}
+	}
+
+	if err := d.Store.Save(Key{Channel: in.Channel, Thread: in.Thread}); err != nil {
+		d.logf("save conversation %s/%s: %v", in.Channel, in.Thread, err)
 	}
 }
 

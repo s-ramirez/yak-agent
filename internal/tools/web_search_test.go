@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -71,7 +73,74 @@ func TestWebSearchToolReturnsNormalizedResults(t *testing.T) {
 	}
 }
 
+func TestWebSearchToolHandlesGzipResponses(t *testing.T) {
+	previousEndpoint := webSearchEndpoint
+	previousClient := webSearchHTTPClient
+	t.Setenv("YAK_BRAVE_API_KEY", "test-key")
+	webSearchEndpoint = "https://search.example.test/res/v1/web/search"
+	webSearchHTTPClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			var buf bytes.Buffer
+			gz := gzip.NewWriter(&buf)
+			_, err := gz.Write([]byte(`{
+				"query": {"original": "yak tool loop", "more_results_available": false},
+				"web": {
+					"results": [
+						{
+							"title": "Compressed result",
+							"url": "https://example.com/compressed",
+							"description": "Compressed payload",
+							"profile": {"name": "example.com"}
+						}
+					]
+				}
+			}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := gz.Close(); err != nil {
+				t.Fatal(err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					"Content-Type":     []string{"application/json"},
+					"Content-Encoding": []string{"gzip"},
+				},
+				Body:    io.NopCloser(bytes.NewReader(buf.Bytes())),
+				Request: r,
+			}, nil
+		}),
+	}
+	defer func() {
+		webSearchEndpoint = previousEndpoint
+		webSearchHTTPClient = previousClient
+	}()
+
+	tool := NewWebSearchTool()
+	raw, _ := json.Marshal(WebSearchParams{Query: "yak tool loop", Count: 1})
+
+	result, err := tool.Execute(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error result: %s", result.Output)
+	}
+	for _, fragment := range []string{
+		`"title": "Compressed result"`,
+		`"url": "https://example.com/compressed"`,
+	} {
+		if !strings.Contains(result.Output, fragment) {
+			t.Fatalf("expected output to contain %q, got %q", fragment, result.Output)
+		}
+	}
+}
+
 func TestWebSearchToolRequiresAPIKey(t *testing.T) {
+	t.Setenv("YAK_BRAVE_API_KEY", "")
+	t.Setenv("BRAVE_API_KEY", "")
+
 	tool := NewWebSearchTool()
 	raw, _ := json.Marshal(WebSearchParams{Query: "yak"})
 
