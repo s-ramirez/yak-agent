@@ -80,6 +80,22 @@ type Runner struct {
 	// heartbeat turns that should use a cheaper/faster model). Falls back
 	// to r.Client when nil or when the override is empty.
 	ClientForModel func(model string) llm.ChatClient
+
+	// activeMemoryStore is the per-turn memory store override. Set by
+	// HandleTurn to conv.MemoryStore (or r.MemoryStore) and cleared on
+	// return. Read via ActiveMemoryStore so tools can route to the
+	// conversation-scoped store.
+	activeMemoryStore *memory.Store
+}
+
+// ActiveMemoryStore returns the memory store for the in-flight turn,
+// or r.MemoryStore when no turn is active. The memory tool uses this
+// to resolve per-conversation memory.
+func (r *Runner) ActiveMemoryStore() *memory.Store {
+	if r.activeMemoryStore != nil {
+		return r.activeMemoryStore
+	}
+	return r.MemoryStore
 }
 
 const maxEmptyRetries = 2
@@ -108,10 +124,32 @@ func (r *Runner) HandleTurn(ctx context.Context, conv *channel.Conversation, use
 		}
 	}
 
+	// Per-conversation workspace: chdir for the duration of the turn.
+	// Safe because the dispatcher serializes turns.
+	if conv.Workspace != "" {
+		if err := os.MkdirAll(conv.Workspace, 0o755); err == nil {
+			if orig, err := os.Getwd(); err == nil {
+				if err := os.Chdir(conv.Workspace); err == nil {
+					defer os.Chdir(orig)
+				}
+			}
+		}
+	}
+
+	// Per-conversation memory override (used by buildSystemPrompt and
+	// by the memory tool, which reads r.ActiveMemoryStore() per call).
+	memStore := r.MemoryStore
+	if conv.MemoryStore != nil {
+		memStore = conv.MemoryStore
+	}
+	prevActive := r.activeMemoryStore
+	r.activeMemoryStore = memStore
+	defer func() { r.activeMemoryStore = prevActive }()
+
 	if len(conv.Messages) == 0 {
 		conv.Messages = append(conv.Messages, types.Message{
 			Role:    "system",
-			Content: r.buildSystemPrompt(),
+			Content: r.buildSystemPromptWith(memStore),
 		})
 	}
 
@@ -153,6 +191,10 @@ type compactionState struct {
 // current configuration. It is invoked once per conversation, when the
 // conversation is first seen by HandleTurn.
 func (r *Runner) buildSystemPrompt() string {
+	return r.buildSystemPromptWith(r.MemoryStore)
+}
+
+func (r *Runner) buildSystemPromptWith(memStore *memory.Store) string {
 	var availableTools []tools.Tool
 	if r.Registry != nil {
 		availableTools = r.Registry.List()
@@ -169,7 +211,7 @@ func (r *Runner) buildSystemPrompt() string {
 		Time:      now.Format(time.RFC3339),
 	}
 
-	curated := r.loadCuratedMemory()
+	curated := loadCuratedFrom(memStore)
 	pluginPrompts := r.composePluginPrompts()
 	return prompt.BuildSystemPrompt(r.Prompt, availableTools, r.Skills.Snapshot(), env, curated, pluginPrompts, r.ContextFiles...)
 }
@@ -563,13 +605,13 @@ func (r *Runner) reportUsage(resp *types.ChatResponse, emit channel.ReplyFunc) {
 	_ = emit(line)
 }
 
-// loadCuratedMemory reads MEMORY.md if a store is configured. Returns "" on
+// loadCuratedFrom reads MEMORY.md from the given store. Returns "" on
 // any error or missing file — memory is best-effort, never fatal.
-func (r *Runner) loadCuratedMemory() string {
-	if r.MemoryStore == nil {
+func loadCuratedFrom(store *memory.Store) string {
+	if store == nil {
 		return ""
 	}
-	curated, err := r.MemoryStore.LoadCurated()
+	curated, err := store.LoadCurated()
 	if err != nil {
 		return ""
 	}

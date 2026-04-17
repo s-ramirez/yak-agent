@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -143,7 +144,7 @@ func (t *WebSearchTool) Execute(ctx context.Context, raw json.RawMessage) (ToolR
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := readWebSearchResponseBody(resp)
 	if err != nil {
 		return errorResultf("failed to read search response: %v", err), nil
 	}
@@ -190,4 +191,18 @@ func (t *WebSearchTool) Execute(ctx context.Context, raw json.RawMessage) (ToolR
 	}
 
 	return ToolResult{Output: string(encoded)}, nil
+}
+
+func readWebSearchResponseBody(resp *http.Response) ([]byte, error) {
+	reader := io.LimitReader(resp.Body, 1<<20)
+	if strings.EqualFold(strings.TrimSpace(resp.Header.Get("Content-Encoding")), "gzip") {
+		gz, err := gzip.NewReader(reader)
+		if err != nil {
+			return nil, err
+		}
+		defer gz.Close()
+		reader = io.LimitReader(gz, 1<<20)
+	}
+
+	return io.ReadAll(reader)
 }

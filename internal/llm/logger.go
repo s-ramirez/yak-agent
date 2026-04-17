@@ -66,6 +66,10 @@ func (l *LoggingClient) writeJSON(filename string, v any) {
 		return
 	}
 	path := filepath.Join(l.logDir, filename)
+	if err := os.MkdirAll(l.logDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to create log dir %s: %v\n", l.logDir, err)
+		return
+	}
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to write log %s: %v\n", path, err)
 	}
