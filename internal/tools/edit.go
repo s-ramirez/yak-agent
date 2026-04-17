@@ -40,6 +40,16 @@ var editDefinition = ToolDefinition{
 		},
 		"required": []string{"path", "edits"},
 	},
+	SelectionRules: []SelectionRule{
+		{
+			Text:     "To modify part of an existing file, use edit. Only use write for creating new files or complete rewrites.",
+			Requires: []string{"write"},
+		},
+		{
+			Text:     "When the user says \"add\", \"change\", \"update\", \"fix\", \"remove\", or \"replace\", use edit, not write.",
+			Requires: []string{"write"},
+		},
+	},
 }
 
 type EditParams struct {

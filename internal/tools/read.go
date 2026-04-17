@@ -31,6 +31,10 @@ var readDefinition = ToolDefinition{
 		},
 		"required": []string{"path"},
 	},
+	SelectionRules: []SelectionRule{
+		{Text: "Read files to understand context before making changes."},
+		{Text: "Always read a file before editing it.", Requires: []string{"edit"}},
+	},
 }
 
 type ReadParams struct {

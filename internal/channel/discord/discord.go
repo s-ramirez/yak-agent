@@ -48,6 +48,36 @@ func New(cfg Config) *Channel {
 	return &Channel{cfg: cfg}
 }
 
+// ConfigFromEnv reads YAK_DISCORD_* environment variables and returns a
+// populated Config along with a reason string when the channel should be
+// disabled. Returns (nil, "", nil) if disabled without explanation (e.g.
+// no token). Errors only when a value is present but malformed.
+//
+// The second return (disabledReason) is non-empty when the channel is
+// explicitly disabled via YAK_DISCORD_ENABLED=false so the caller can log it.
+func ConfigFromEnv(getenv func(string) string, parseBool func(name string, def bool) bool) (*Config, string, error) {
+	if !parseBool("YAK_DISCORD_ENABLED", true) {
+		return nil, "YAK_DISCORD_ENABLED=false", nil
+	}
+	token := strings.TrimSpace(getenv("YAK_DISCORD_TOKEN"))
+	if token == "" {
+		return nil, "", nil
+	}
+	var owners []string
+	if raw := getenv("YAK_DISCORD_OWNER_IDS"); raw != "" {
+		for _, id := range strings.Split(raw, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				owners = append(owners, id)
+			}
+		}
+	}
+	return &Config{
+		Token:    token,
+		OwnerIDs: owners,
+		GuildTag: getenv("YAK_DISCORD_GUILD_TAG"),
+	}, "", nil
+}
+
 func (c *Channel) Name() string { return channelName }
 
 // Listen opens the Discord gateway connection and forwards qualifying

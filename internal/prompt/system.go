@@ -52,7 +52,9 @@ func buildRemainder(available []tools.Tool, loadedSkills []skills.Skill, env Env
 
 	if len(available) > 0 {
 		sections = append(sections, buildToolGuidelines(available))
-		sections = append(sections, buildToolSelectionRules(available))
+		if s := buildToolSelectionRules(available); s != "" {
+			sections = append(sections, s)
+		}
 	}
 
 	if s := buildSkillsSection(loadedSkills); s != "" {
@@ -109,7 +111,7 @@ func buildCuratedMemorySection(curated string, available []tools.Tool) string {
 	curated = strings.TrimSpace(curated)
 	hasMemoryTools := false
 	for _, t := range available {
-		if strings.HasPrefix(t.Definition().Name, "memory_") {
+		if t.Definition().Name == "memory" {
 			hasMemoryTools = true
 			break
 		}
@@ -123,8 +125,8 @@ func buildCuratedMemorySection(curated string, available []tools.Tool) string {
 		lines = append(lines,
 			"You have a persistent memory store at .yak/memory/ with three layers:",
 			"- MEMORY.md — curated long-term facts (shown below). Only the /memory:distill flow should rewrite it.",
-			"- sessions/YYYY-MM-DD-HHMM.md — durable session notes. Use memory_write to save anything worth remembering from this session.",
-			"- vault/{Memory,Knowledge,Journal,Notes}/*.md — permanent reference notes. Use memory_read/memory_search/memory_list to recall.",
+			"- sessions/YYYY-MM-DD-HHMM.md — durable session notes. Use `memory` with action=write to save anything worth remembering from this session.",
+			"- vault/{Memory,Knowledge,Journal,Notes}/*.md — permanent reference notes. Use `memory` with action=read/search/list to recall.",
 		)
 	}
 	if curated != "" {
@@ -201,108 +203,36 @@ func buildToolGuidelines(available []tools.Tool) string {
 	return strings.Join(lines, "\n")
 }
 
+// buildToolSelectionRules walks the SelectionRules declared on each
+// available tool and emits the bullets whose Requires are satisfied.
+// Rules are emitted in the order tools are listed, preserving each
+// tool's own rule order — keeping the per-tool narrative intact.
 func buildToolSelectionRules(available []tools.Tool) string {
-	hasRead := false
-	hasEdit := false
-	hasWrite := false
-	hasBash := false
-	hasGrep := false
-	hasLs := false
-	hasFind := false
-	hasWebFetch := false
-	hasWebSearch := false
-	hasSessionsSpawn := false
-	hasSubagents := false
+	present := make(map[string]struct{}, len(available))
+	for _, t := range available {
+		present[t.Definition().Name] = struct{}{}
+	}
 
-	for _, tool := range available {
-		switch tool.Definition().Name {
-		case "read":
-			hasRead = true
-		case "edit":
-			hasEdit = true
-		case "write":
-			hasWrite = true
-		case "bash":
-			hasBash = true
-		case "grep":
-			hasGrep = true
-		case "ls":
-			hasLs = true
-		case "find":
-			hasFind = true
-		case "web_fetch":
-			hasWebFetch = true
-		case "web_search":
-			hasWebSearch = true
-		case "sessions_spawn":
-			hasSessionsSpawn = true
-		case "subagents":
-			hasSubagents = true
+	lines := []string{"# Tool selection"}
+	for _, t := range available {
+		for _, rule := range t.Definition().SelectionRules {
+			if !allPresent(rule.Requires, present) {
+				continue
+			}
+			lines = append(lines, "- "+rule.Text)
 		}
 	}
-
-	rules := []string{"# Tool selection"}
-
-	if hasRead && hasEdit {
-		rules = append(rules, "- Always read a file before editing it.")
+	if len(lines) == 1 {
+		return ""
 	}
+	return strings.Join(lines, "\n")
+}
 
-	if hasEdit && hasWrite {
-		rules = append(rules,
-			"- To modify part of an existing file, use edit. Only use write for creating new files or complete rewrites.",
-			"- When the user says \"add\", \"change\", \"update\", \"fix\", \"remove\", or \"replace\", use edit, not write.",
-		)
+func allPresent(required []string, present map[string]struct{}) bool {
+	for _, name := range required {
+		if _, ok := present[name]; !ok {
+			return false
+		}
 	}
-
-	if hasRead {
-		rules = append(rules, "- Read files to understand context before making changes.")
-	}
-
-	if hasBash {
-		rules = append(rules,
-			"- Use bash to run shell commands when you need command output, tests, or build results.",
-			"- Prefer bash over guessing command results.",
-		)
-	}
-
-	if hasGrep {
-		rules = append(rules, "- Use grep to search file contents for patterns instead of running grep via bash.")
-	}
-
-	if hasLs {
-		rules = append(rules, "- Use ls to list directory contents instead of running ls via bash.")
-	}
-
-	if hasFind {
-		rules = append(rules,
-			"- Use find to locate files by name pattern instead of running find via bash.",
-			"- Prefer find over bash for any file search task. Only fall back to bash when you need features find does not support.",
-		)
-	}
-
-	if hasWebSearch {
-		rules = append(rules, "- Use web_search for public web discovery instead of shelling out to ad-hoc search commands.")
-	}
-
-	if hasWebFetch {
-		rules = append(rules, "- Use web_fetch to read a specific web page when you already have a URL.")
-	}
-
-	if hasWebSearch && hasWebFetch {
-		rules = append(rules, "- For web research, use web_search to find candidate pages and web_fetch to read the most relevant ones.")
-	}
-
-	if hasSessionsSpawn {
-		rules = append(rules,
-			"- Use sessions_spawn when a task can be delegated to a focused helper agent.",
-			"- Always provide the target subagent name and include the necessary context in the delegated task.",
-			"- Default to wait=true unless parallel progress is important.",
-		)
-	}
-
-	if hasSubagents {
-		rules = append(rules, "- Use subagents to inspect, wait on, or cancel background child runs.")
-	}
-
-	return strings.Join(rules, "\n")
+	return true
 }

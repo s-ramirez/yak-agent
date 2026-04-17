@@ -14,21 +14,26 @@ func newTestStore(t *testing.T) *memory.Store {
 	return memory.NewStore(t.TempDir())
 }
 
-func TestMemoryWriteAndRead(t *testing.T) {
-	store := newTestStore(t)
-	write := NewMemoryWriteTool(store)
-	read := NewMemoryReadTool(store)
+func execMemory(t *testing.T, tool Tool, p MemoryParams) ToolResult {
+	t.Helper()
+	raw, _ := json.Marshal(p)
+	res, err := tool.Execute(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	return res
+}
 
-	raw, _ := json.Marshal(MemoryWriteParams{Path: "MEMORY.md", Content: "alpha\nbeta\n"})
-	res, err := write.Execute(context.Background(), raw)
-	if err != nil || res.IsError {
-		t.Fatalf("write failed: %v / %s", err, res.Output)
+func TestMemoryWriteAndRead(t *testing.T) {
+	tool := NewMemoryTool(newTestStore(t))
+
+	if res := execMemory(t, tool, MemoryParams{Action: "write", Path: "MEMORY.md", Content: "alpha\nbeta\n"}); res.IsError {
+		t.Fatalf("write failed: %s", res.Output)
 	}
 
-	raw, _ = json.Marshal(MemoryReadParams{Path: "MEMORY.md"})
-	res, err = read.Execute(context.Background(), raw)
-	if err != nil || res.IsError {
-		t.Fatalf("read failed: %v / %s", err, res.Output)
+	res := execMemory(t, tool, MemoryParams{Action: "read", Path: "MEMORY.md"})
+	if res.IsError {
+		t.Fatalf("read failed: %s", res.Output)
 	}
 	if !strings.Contains(res.Output, "1\talpha") || !strings.Contains(res.Output, "2\tbeta") {
 		t.Fatalf("unexpected output: %q", res.Output)
@@ -37,16 +42,10 @@ func TestMemoryWriteAndRead(t *testing.T) {
 
 func TestMemoryWriteAppendMode(t *testing.T) {
 	store := newTestStore(t)
-	write := NewMemoryWriteTool(store)
+	tool := NewMemoryTool(store)
 
-	raw, _ := json.Marshal(MemoryWriteParams{Path: "sessions/s.md", Content: "a\n"})
-	if _, err := write.Execute(context.Background(), raw); err != nil {
-		t.Fatal(err)
-	}
-	raw, _ = json.Marshal(MemoryWriteParams{Path: "sessions/s.md", Content: "b\n", Mode: "append"})
-	if _, err := write.Execute(context.Background(), raw); err != nil {
-		t.Fatal(err)
-	}
+	execMemory(t, tool, MemoryParams{Action: "write", Path: "sessions/s.md", Content: "a\n"})
+	execMemory(t, tool, MemoryParams{Action: "write", Path: "sessions/s.md", Content: "b\n", Mode: "append"})
 
 	data, err := store.Read("sessions/s.md")
 	if err != nil {
@@ -58,39 +57,24 @@ func TestMemoryWriteAppendMode(t *testing.T) {
 }
 
 func TestMemoryWriteRejectsEscape(t *testing.T) {
-	store := newTestStore(t)
-	write := NewMemoryWriteTool(store)
-	raw, _ := json.Marshal(MemoryWriteParams{Path: "../escape.md", Content: "x"})
-	res, err := write.Execute(context.Background(), raw)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tool := NewMemoryTool(newTestStore(t))
+	res := execMemory(t, tool, MemoryParams{Action: "write", Path: "../escape.md", Content: "x"})
 	if !res.IsError {
 		t.Fatalf("expected sandbox error, got %q", res.Output)
 	}
 }
 
 func TestMemoryWriteRejectsInvalidMode(t *testing.T) {
-	store := newTestStore(t)
-	write := NewMemoryWriteTool(store)
-	raw, _ := json.Marshal(MemoryWriteParams{Path: "x.md", Content: "y", Mode: "delete"})
-	res, err := write.Execute(context.Background(), raw)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tool := NewMemoryTool(newTestStore(t))
+	res := execMemory(t, tool, MemoryParams{Action: "write", Path: "x.md", Content: "y", Mode: "delete"})
 	if !res.IsError {
 		t.Fatalf("expected mode error, got %q", res.Output)
 	}
 }
 
 func TestMemoryReadMissing(t *testing.T) {
-	store := newTestStore(t)
-	read := NewMemoryReadTool(store)
-	raw, _ := json.Marshal(MemoryReadParams{Path: "missing.md"})
-	res, err := read.Execute(context.Background(), raw)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tool := NewMemoryTool(newTestStore(t))
+	res := execMemory(t, tool, MemoryParams{Action: "read", Path: "missing.md"})
 	if !res.IsError {
 		t.Fatalf("expected error, got %q", res.Output)
 	}
@@ -101,11 +85,10 @@ func TestMemorySearchCaseInsensitive(t *testing.T) {
 	if err := store.Write("MEMORY.md", []byte("User: Alice\nTimezone: UTC\n"), false); err != nil {
 		t.Fatal(err)
 	}
-	search := NewMemorySearchTool(store)
-	raw, _ := json.Marshal(MemorySearchParams{Query: "alice"})
-	res, err := search.Execute(context.Background(), raw)
-	if err != nil || res.IsError {
-		t.Fatalf("search failed: %v / %s", err, res.Output)
+	tool := NewMemoryTool(store)
+	res := execMemory(t, tool, MemoryParams{Action: "search", Query: "alice"})
+	if res.IsError {
+		t.Fatalf("search failed: %s", res.Output)
 	}
 	if !strings.Contains(res.Output, "MEMORY.md:1") {
 		t.Fatalf("expected match on line 1: %q", res.Output)
@@ -117,9 +100,8 @@ func TestMemorySearchNoMatches(t *testing.T) {
 	if err := store.Write("MEMORY.md", []byte("hello\n"), false); err != nil {
 		t.Fatal(err)
 	}
-	search := NewMemorySearchTool(store)
-	raw, _ := json.Marshal(MemorySearchParams{Query: "zzzz"})
-	res, _ := search.Execute(context.Background(), raw)
+	tool := NewMemoryTool(store)
+	res := execMemory(t, tool, MemoryParams{Action: "search", Query: "zzzz"})
 	if res.Output != "no matches" {
 		t.Fatalf("unexpected: %q", res.Output)
 	}
@@ -133,15 +115,22 @@ func TestMemoryListReturnsSortedEntries(t *testing.T) {
 	if err := store.Write("sessions/a.md", []byte("x"), false); err != nil {
 		t.Fatal(err)
 	}
-	list := NewMemoryListTool(store)
-	raw, _ := json.Marshal(MemoryListParams{Dir: "sessions"})
-	res, err := list.Execute(context.Background(), raw)
-	if err != nil || res.IsError {
-		t.Fatalf("list failed: %v / %s", err, res.Output)
+	tool := NewMemoryTool(store)
+	res := execMemory(t, tool, MemoryParams{Action: "list", Dir: "sessions"})
+	if res.IsError {
+		t.Fatalf("list failed: %s", res.Output)
 	}
 	idxA := strings.Index(res.Output, "a.md")
 	idxB := strings.Index(res.Output, "b.md")
 	if idxA < 0 || idxB < 0 || idxA > idxB {
 		t.Fatalf("expected a.md before b.md: %q", res.Output)
+	}
+}
+
+func TestMemoryUnknownAction(t *testing.T) {
+	tool := NewMemoryTool(newTestStore(t))
+	res := execMemory(t, tool, MemoryParams{Action: "delete", Path: "x"})
+	if !res.IsError {
+		t.Fatalf("expected error for unknown action, got %q", res.Output)
 	}
 }

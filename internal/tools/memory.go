@@ -10,65 +10,114 @@ import (
 	"yak-go/internal/memory"
 )
 
-// Memory tools are thin adapters over *memory.Store. All paths in tool
-// params are relative to .yak/memory/. The store enforces sandboxing.
-
-// ---------- memory_read ----------
-
-type MemoryReadTool struct {
+// memoryTool is a thin adapter over *memory.Store that exposes four
+// actions (read, write, search, list) through a single OpenAI-compatible
+// tool. All paths are relative to .yak/memory/; the store enforces the
+// sandbox.
+type memoryTool struct {
 	store *memory.Store
 }
 
-var memoryReadDefinition = ToolDefinition{
-	Name: "memory_read",
-	Description: "Read a file from the agent's persistent memory store (.yak/memory/). " +
+// MemoryParams carries arguments for every action. Only the fields that
+// apply to the chosen action need to be populated; the rest are ignored.
+type MemoryParams struct {
+	Action string `json:"action"`
+
+	// read / write / list
+	Path string `json:"path"`
+
+	// read
+	Offset int `json:"offset"`
+	Limit  int `json:"limit"`
+
+	// write
+	Content string `json:"content"`
+	Mode    string `json:"mode"` // "overwrite" (default) | "append"
+
+	// search
+	Query      string `json:"query"`
+	MaxResults int    `json:"max_results"`
+
+	// list
+	Dir string `json:"dir"`
+}
+
+var memoryDefinition = ToolDefinition{
+	Name: "memory",
+	Description: "Read/write/search/list the agent's persistent memory store (.yak/memory/). " +
 		"Paths are relative to the memory root (e.g. \"MEMORY.md\", \"sessions/2026-04-13-1422.md\", \"vault/Knowledge/foo.md\").",
 	Guidelines: []string{
-		"Use memory_read to recall prior context before answering questions about past sessions, user preferences, or durable facts.",
+		"Use action=read to recall prior context before answering questions about past sessions, user preferences, or durable facts.",
+		"Use action=write with mode=append for session notes; only overwrite MEMORY.md from an explicit distill flow.",
+		"Use action=search for case-insensitive literal substring scan across all markdown in memory — not semantic search; pick distinctive keywords.",
+		"Use action=list to discover existing session notes and vault files before writing new ones.",
 		"Paths must be relative to the memory root — never pass absolute paths.",
 	},
 	Parameters: JSONSchema{
 		"type": "object",
 		"properties": map[string]any{
-			"path":   map[string]any{"type": "string", "description": "Path relative to .yak/memory/"},
-			"offset": map[string]any{"type": "number", "description": "1-indexed line to start at (optional)"},
-			"limit":  map[string]any{"type": "number", "description": "Maximum number of lines to return (optional)"},
+			"action": map[string]any{
+				"type": "string",
+				"enum": []string{"read", "write", "search", "list"},
+			},
+			"path":        map[string]any{"type": "string", "description": "Path relative to .yak/memory/ (read/write)"},
+			"offset":      map[string]any{"type": "number", "description": "1-indexed line to start at (read only)"},
+			"limit":       map[string]any{"type": "number", "description": "Maximum lines to return (read only)"},
+			"content":     map[string]any{"type": "string", "description": "Content to write (write only)"},
+			"mode":        map[string]any{"type": "string", "enum": []string{"overwrite", "append"}, "description": "Write mode (write only)"},
+			"query":       map[string]any{"type": "string", "description": "Substring to search for (search only)"},
+			"max_results": map[string]any{"type": "number", "description": "Maximum hits (search only, default 20)"},
+			"dir":         map[string]any{"type": "string", "description": "Directory relative to memory root (list only; empty = root)"},
 		},
-		"required": []string{"path"},
+		"required": []string{"action"},
 	},
 }
 
-type MemoryReadParams struct {
-	Path   string `json:"path"`
-	Offset int    `json:"offset"`
-	Limit  int    `json:"limit"`
-}
+// NewMemoryTool returns the unified memory tool.
+func NewMemoryTool(store *memory.Store) Tool { return &memoryTool{store: store} }
 
-func NewMemoryReadTool(store *memory.Store) *MemoryReadTool { return &MemoryReadTool{store: store} }
+func (t *memoryTool) Definition() ToolDefinition { return memoryDefinition }
 
-func (t *MemoryReadTool) Definition() ToolDefinition { return memoryReadDefinition }
-
-func (t *MemoryReadTool) Execute(_ context.Context, raw json.RawMessage) (ToolResult, error) {
-	var params MemoryReadParams
-	if err := json.Unmarshal(raw, &params); err != nil {
+func (t *memoryTool) Execute(_ context.Context, raw json.RawMessage) (ToolResult, error) {
+	var p MemoryParams
+	if err := json.Unmarshal(raw, &p); err != nil {
 		return errorResult("invalid JSON arguments"), nil
 	}
-	data, err := t.store.Read(params.Path)
+	switch strings.TrimSpace(p.Action) {
+	case "read":
+		return t.read(p), nil
+	case "write":
+		return t.write(p), nil
+	case "search":
+		return t.search(p), nil
+	case "", "list":
+		// list is the default when no action is given (cheapest, read-only)
+		return t.list(p), nil
+	default:
+		return errorResultf("action must be one of: read, write, search, list (got %q)", p.Action), nil
+	}
+}
+
+func (t *memoryTool) read(p MemoryParams) ToolResult {
+	if strings.TrimSpace(p.Path) == "" {
+		return errorResult("path is required for action=read")
+	}
+	data, err := t.store.Read(p.Path)
 	if err != nil {
-		return errorResultf("memory file not found or unreadable: %s", params.Path), nil
+		return errorResultf("memory file not found or unreadable: %s", p.Path)
 	}
 
-	offset := params.Offset
+	offset := p.Offset
 	if offset < 1 {
 		offset = 1
 	}
-	limit := params.Limit
+	limit := p.Limit
 	if limit <= 0 || limit > MaxReadLines {
 		limit = MaxReadLines
 	}
 
 	lines := strings.Split(string(data), "\n")
-	var out []string
+	out := make([]string, 0, limit)
 	for i, line := range lines {
 		lineNo := i + 1
 		if lineNo < offset {
@@ -80,175 +129,60 @@ func (t *MemoryReadTool) Execute(_ context.Context, raw json.RawMessage) (ToolRe
 		out = append(out, fmt.Sprintf("%d\t%s", lineNo, line))
 	}
 	if len(out) == 0 {
-		return ToolResult{Output: "(empty)"}, nil
+		return ToolResult{Output: "(empty)"}
 	}
-	return ToolResult{Output: strings.Join(out, "\n")}, nil
+	return ToolResult{Output: strings.Join(out, "\n")}
 }
 
-// ---------- memory_write ----------
-
-type MemoryWriteTool struct {
-	store *memory.Store
-}
-
-var memoryWriteDefinition = ToolDefinition{
-	Name: "memory_write",
-	Description: "Write or append to a file in the agent's persistent memory store (.yak/memory/). " +
-		"Use this to save durable session notes, vault reference pages, or to update MEMORY.md during a distill flow. " +
-		"Paths are relative to the memory root.",
-	Guidelines: []string{
-		"Save session notes worth keeping as sessions/YYYY-MM-DD-HHMM.md.",
-		"Put permanent reference material under vault/Memory, vault/Knowledge, vault/Journal, or vault/Notes.",
-		"Only overwrite MEMORY.md from an explicit distill flow — do not treat it as a scratchpad.",
-		"Parent directories are created automatically.",
-	},
-	Parameters: JSONSchema{
-		"type": "object",
-		"properties": map[string]any{
-			"path":    map[string]any{"type": "string", "description": "Path relative to .yak/memory/"},
-			"content": map[string]any{"type": "string", "description": "Content to write"},
-			"mode": map[string]any{
-				"type":        "string",
-				"description": "\"overwrite\" (default) or \"append\"",
-				"enum":        []string{"overwrite", "append"},
-			},
-		},
-		"required": []string{"path", "content"},
-	},
-}
-
-type MemoryWriteParams struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-	Mode    string `json:"mode"`
-}
-
-func NewMemoryWriteTool(store *memory.Store) *MemoryWriteTool {
-	return &MemoryWriteTool{store: store}
-}
-
-func (t *MemoryWriteTool) Definition() ToolDefinition { return memoryWriteDefinition }
-
-func (t *MemoryWriteTool) Execute(_ context.Context, raw json.RawMessage) (ToolResult, error) {
-	var params MemoryWriteParams
-	if err := json.Unmarshal(raw, &params); err != nil {
-		return errorResult("invalid JSON arguments"), nil
+func (t *memoryTool) write(p MemoryParams) ToolResult {
+	if strings.TrimSpace(p.Path) == "" {
+		return errorResult("path is required for action=write")
 	}
-	appendMode := false
-	switch params.Mode {
+	var appendMode bool
+	switch p.Mode {
 	case "", "overwrite":
 		appendMode = false
 	case "append":
 		appendMode = true
 	default:
-		return errorResultf("mode must be \"overwrite\" or \"append\", got %q", params.Mode), nil
+		return errorResultf("mode must be \"overwrite\" or \"append\", got %q", p.Mode)
 	}
-	if err := t.store.Write(params.Path, []byte(params.Content), appendMode); err != nil {
-		return errorResultf("%v", err), nil
+	if err := t.store.Write(p.Path, []byte(p.Content), appendMode); err != nil {
+		return errorResultf("%v", err)
 	}
 	verb := "wrote"
 	if appendMode {
 		verb = "appended"
 	}
 	lineCount := 0
-	if params.Content != "" {
-		lineCount = strings.Count(params.Content, "\n") + 1
+	if p.Content != "" {
+		lineCount = strings.Count(p.Content, "\n") + 1
 	}
-	return ToolResult{Output: fmt.Sprintf("%s %d lines to memory/%s", verb, lineCount, params.Path)}, nil
+	return ToolResult{Output: fmt.Sprintf("%s %d lines to memory/%s", verb, lineCount, p.Path)}
 }
 
-// ---------- memory_search ----------
-
-type MemorySearchTool struct {
-	store *memory.Store
-}
-
-var memorySearchDefinition = ToolDefinition{
-	Name:        "memory_search",
-	Description: "Case-insensitive literal substring search across all markdown files in .yak/memory/. Returns path:line hits with the matching line as context.",
-	Guidelines: []string{
-		"Use memory_search to find prior mentions of a topic across MEMORY.md, sessions, and the vault.",
-		"This is literal substring matching — not semantic search. Pick distinctive keywords.",
-	},
-	Parameters: JSONSchema{
-		"type": "object",
-		"properties": map[string]any{
-			"query":       map[string]any{"type": "string", "description": "Substring to search for"},
-			"max_results": map[string]any{"type": "number", "description": "Maximum number of hits (default 20)"},
-		},
-		"required": []string{"query"},
-	},
-}
-
-type MemorySearchParams struct {
-	Query      string `json:"query"`
-	MaxResults int    `json:"max_results"`
-}
-
-func NewMemorySearchTool(store *memory.Store) *MemorySearchTool {
-	return &MemorySearchTool{store: store}
-}
-
-func (t *MemorySearchTool) Definition() ToolDefinition { return memorySearchDefinition }
-
-func (t *MemorySearchTool) Execute(_ context.Context, raw json.RawMessage) (ToolResult, error) {
-	var params MemorySearchParams
-	if err := json.Unmarshal(raw, &params); err != nil {
-		return errorResult("invalid JSON arguments"), nil
-	}
-	hits, err := t.store.Search(params.Query, params.MaxResults)
+func (t *memoryTool) search(p MemoryParams) ToolResult {
+	hits, err := t.store.Search(p.Query, p.MaxResults)
 	if err != nil {
-		return errorResult(err.Error()), nil
+		return errorResult(err.Error())
 	}
 	if len(hits) == 0 {
-		return ToolResult{Output: "no matches"}, nil
+		return ToolResult{Output: "no matches"}
 	}
 	lines := make([]string, 0, len(hits))
 	for _, h := range hits {
 		lines = append(lines, fmt.Sprintf("%s:%d: %s", h.Path, h.Line, h.Snippet))
 	}
-	return ToolResult{Output: strings.Join(lines, "\n")}, nil
+	return ToolResult{Output: strings.Join(lines, "\n")}
 }
 
-// ---------- memory_list ----------
-
-type MemoryListTool struct {
-	store *memory.Store
-}
-
-var memoryListDefinition = ToolDefinition{
-	Name:        "memory_list",
-	Description: "List entries in a directory under .yak/memory/. Pass an empty path (or omit it) to list the memory root.",
-	Guidelines: []string{
-		"Use memory_list to discover what session notes and vault files already exist before writing new ones.",
-	},
-	Parameters: JSONSchema{
-		"type": "object",
-		"properties": map[string]any{
-			"dir": map[string]any{"type": "string", "description": "Directory relative to .yak/memory/ (empty = root)"},
-		},
-	},
-}
-
-type MemoryListParams struct {
-	Dir string `json:"dir"`
-}
-
-func NewMemoryListTool(store *memory.Store) *MemoryListTool { return &MemoryListTool{store: store} }
-
-func (t *MemoryListTool) Definition() ToolDefinition { return memoryListDefinition }
-
-func (t *MemoryListTool) Execute(_ context.Context, raw json.RawMessage) (ToolResult, error) {
-	var params MemoryListParams
-	if err := json.Unmarshal(raw, &params); err != nil {
-		return errorResult("invalid JSON arguments"), nil
-	}
-	entries, err := t.store.List(params.Dir)
+func (t *memoryTool) list(p MemoryParams) ToolResult {
+	entries, err := t.store.List(p.Dir)
 	if err != nil {
-		return errorResult(err.Error()), nil
+		return errorResult(err.Error())
 	}
 	if len(entries) == 0 {
-		return ToolResult{Output: "(empty)"}, nil
+		return ToolResult{Output: "(empty)"}
 	}
 	lines := make([]string, 0, len(entries))
 	for _, e := range entries {
@@ -258,5 +192,5 @@ func (t *MemoryListTool) Execute(_ context.Context, raw json.RawMessage) (ToolRe
 		}
 		lines = append(lines, fmt.Sprintf("%s %8d  %s  %s", kind, e.Size, e.Mtime.UTC().Format(time.RFC3339), e.Name))
 	}
-	return ToolResult{Output: strings.Join(lines, "\n")}, nil
+	return ToolResult{Output: strings.Join(lines, "\n")}
 }

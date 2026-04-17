@@ -42,6 +42,10 @@ func NewFindTool(extraGuidelines ...string) *FindTool {
 				},
 				"required": []string{"pattern"},
 			},
+			SelectionRules: []SelectionRule{
+				{Text: "Use find to locate files by name pattern instead of running find via bash."},
+				{Text: "Prefer find over bash for any file search task. Only fall back to bash when you need features find does not support."},
+			},
 		},
 	}
 }

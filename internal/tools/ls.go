@@ -28,6 +28,9 @@ var lsDefinition = ToolDefinition{
 			"limit": map[string]any{"type": "number", "description": "Maximum number of entries to return (default: 500)"},
 		},
 	},
+	SelectionRules: []SelectionRule{
+		{Text: "Use ls to list directory contents instead of running ls via bash."},
+	},
 }
 
 type LsParams struct {

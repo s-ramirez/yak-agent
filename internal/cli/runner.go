@@ -36,7 +36,11 @@ type Runner struct {
 	Client          llm.ChatClient
 	Registry        *tools.Registry
 	Skills          *skills.Registry
-	AfterTurnHooks  []plugin.AfterTurnHook
+	// AfterTurnHooks run after each assistant text response. The first hook
+	// that returns a non-empty string wins: its message is appended as a user
+	// turn, the agent loop continues, and remaining hooks are skipped for
+	// that turn. Register higher-priority hooks earlier in the slice.
+	AfterTurnHooks []plugin.AfterTurnHook
 	AgentStartHooks []plugin.AgentStartHook
 	AgentEndHooks   []plugin.AgentEndHook
 	PluginPrompts   []string
@@ -59,15 +63,6 @@ type Runner struct {
 	// estimated context usage crosses the threshold. Only fires when
 	// ContextSize > 0.
 	Compaction compaction.Settings
-
-	// lastSummary carries the previous compaction summary forward so the
-	// next compaction can use the UPDATE_SUMMARIZATION_PROMPT variant.
-	lastSummary string
-
-	// lastUsage tracks the most recent authoritative token count returned
-	// by the LLM so compaction can use it across turns.
-	lastUsage      *types.Usage
-	lastUsageIndex int
 
 	// Scheduler, if set, is consulted when building the system prompt so
 	// the model sees currently-enabled user-managed jobs at startup. The
@@ -130,8 +125,28 @@ func (r *Runner) HandleTurn(ctx context.Context, conv *channel.Conversation, use
 		toolSchemas = r.Registry.Schemas()
 	}
 
-	_, err := r.agentLoop(ctx, &conv.Messages, toolSchemas, reply, client)
+	state := &compactionState{
+		summary:    conv.LastSummary,
+		usage:      conv.LastUsage,
+		usageIndex: conv.LastUsageIndex,
+	}
+	if state.usageIndex == 0 && state.usage == nil {
+		state.usageIndex = -1
+	}
+	_, err := r.agentLoop(ctx, &conv.Messages, toolSchemas, reply, client, state)
+	conv.LastSummary = state.summary
+	conv.LastUsage = state.usage
+	conv.LastUsageIndex = state.usageIndex
 	return err
+}
+
+// compactionState is the per-conversation compaction bookkeeping. The
+// runner carries a reference for the duration of a single turn and
+// writes the updated values back to the Conversation afterwards.
+type compactionState struct {
+	summary    string
+	usage      *types.Usage
+	usageIndex int
 }
 
 // buildSystemPrompt assembles the system prompt from the runner's
@@ -238,7 +253,8 @@ func (r *Runner) RunConversation(
 	messages []types.Message,
 	toolSchemas []types.ChatRequestTool,
 ) (string, []types.Message, error) {
-	finalText, err := r.agentLoop(ctx, &messages, toolSchemas, nil, r.Client)
+	state := &compactionState{usageIndex: -1}
+	finalText, err := r.agentLoop(ctx, &messages, toolSchemas, nil, r.Client, state)
 	return finalText, messages, err
 }
 
@@ -252,6 +268,7 @@ func (r *Runner) agentLoop(
 	toolSchemas []types.ChatRequestTool,
 	emit channel.ReplyFunc,
 	client llm.ChatClient,
+	state *compactionState,
 ) (finalText string, err error) {
 	lifecycleCtx := plugin.AgentLifecycleContext{
 		AgentID:   r.AgentID,
@@ -270,12 +287,9 @@ func (r *Runner) agentLoop(
 	emptyRetries := 0
 	rateLimitBackoff := initialRateLimitBackoff
 	rateLimitStartedAt := time.Time{}
-	if r.lastUsageIndex == 0 {
-		r.lastUsageIndex = -1
-	}
 
 	for {
-		if r.maybeCompact(ctx, messages, emit) {
+		if r.maybeCompact(ctx, messages, emit, state) {
 			hadToolCalls = false
 			emptyRetries = 0
 		}
@@ -316,8 +330,8 @@ func (r *Runner) agentLoop(
 
 		r.reportUsage(resp, emit)
 		if resp.Usage != nil {
-			r.lastUsage = resp.Usage
-			r.lastUsageIndex = len(*messages) - 1
+			state.usage = resp.Usage
+			state.usageIndex = len(*messages) - 1
 		}
 
 		toolCalls := types.GetToolCalls(resp)
@@ -450,11 +464,11 @@ func (r *Runner) agentLoop(
 // maybeCompact checks the budget and, if triggered, replaces *messages
 // with a compacted version in place. Returns true when compaction ran
 // successfully so callers can reset per-turn state.
-func (r *Runner) maybeCompact(ctx context.Context, messages *[]types.Message, emit channel.ReplyFunc) bool {
+func (r *Runner) maybeCompact(ctx context.Context, messages *[]types.Message, emit channel.ReplyFunc, state *compactionState) bool {
 	if !r.Compaction.Enabled || r.ContextSize <= 0 {
 		return false
 	}
-	tokens := compaction.EstimateContextTokens(*messages, r.lastUsage, r.lastUsageIndex)
+	tokens := compaction.EstimateContextTokens(*messages, state.usage, state.usageIndex)
 	if !compaction.ShouldCompact(tokens, r.ContextSize, r.Compaction) {
 		return false
 	}
@@ -463,7 +477,7 @@ func (r *Runner) maybeCompact(ctx context.Context, messages *[]types.Message, em
 		_ = emit(compaction.FormatTriggerLine(tokens, r.ContextSize, r.Compaction) + "\n")
 	}
 
-	res, err := compaction.Compact(ctx, r.Client, *messages, r.lastSummary, r.Compaction, tokens)
+	res, err := compaction.Compact(ctx, r.Client, *messages, state.summary, r.Compaction, tokens)
 	if err != nil {
 		if emit != nil {
 			_ = emit(fmt.Sprintf("[compaction failed: %v]\n", err))
@@ -475,9 +489,9 @@ func (r *Runner) maybeCompact(ctx context.Context, messages *[]types.Message, em
 	}
 
 	*messages = res.Messages
-	r.lastSummary = res.Summary
-	r.lastUsage = nil
-	r.lastUsageIndex = -1
+	state.summary = res.Summary
+	state.usage = nil
+	state.usageIndex = -1
 
 	if emit != nil {
 		after := compaction.EstimateContextTokens(*messages, nil, -1)
@@ -585,6 +599,7 @@ func (r *Runner) DistillMemory(ctx context.Context) error {
 		{Role: "user", Content: channel.DistillInstruction},
 	}
 
-	_, err := r.agentLoop(ctx, &messages, toolSchemas, nil, r.Client)
+	state := &compactionState{usageIndex: -1}
+	_, err := r.agentLoop(ctx, &messages, toolSchemas, nil, r.Client, state)
 	return err
 }

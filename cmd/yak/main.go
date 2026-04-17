@@ -21,6 +21,7 @@ import (
 	"yak-go/internal/channel/sched"
 	"yak-go/internal/cli"
 	"yak-go/internal/compaction"
+	heartbeatPkg "yak-go/internal/heartbeat"
 	"yak-go/internal/llm"
 	"yak-go/internal/memory"
 	"yak-go/internal/plugin"
@@ -140,143 +141,29 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: loading schedule store: %v\n", err)
 	}
-	// heartbeatCfg is non-nil when YAK_HEARTBEAT_INTERVAL is set and valid.
-	type heartbeatCfg struct {
-		interval    time.Duration
-		target      string // "cli" | "imessage" | "discord" | "none"
-		to          string // outbound recipient handle / channel ID
-		prompt      string
-		model       string // model override for heartbeat turns; "" = default
-		activeStart string // "HH:MM"
-		activeEnd   string // "HH:MM"
-		timezone    string // IANA, "" = local
-	}
-	type mealReminderCfg struct {
-		target string
-		to     string
-		model  string
-	}
-	var hbCfg *heartbeatCfg
-	var mealCfg mealReminderCfg
 	var scheduler *schedule.Scheduler
 	if scheduleStore != nil {
 		scheduler = schedule.NewScheduler(scheduleStore, 16)
-		mealCfg = mealReminderCfg{
-			target: os.Getenv("YAK_HEARTBEAT_TARGET"),
-			to:     os.Getenv("YAK_HEARTBEAT_TO"),
-			model:  os.Getenv("YAK_HEARTBEAT_MODEL"),
-		}
-		if mealCfg.target == "" {
-			mealCfg.target = "cli"
-		}
-		mealPrompt := "Meal check-in: review today's calorie tracker and ask only about the relevant missing meal for this schedule. At 9am ask about breakfast, at 2pm ask about lunch, at 8pm ask about dinner. If that meal is already logged or nothing is actionable, reply HEARTBEAT_OK."
-		// Meal reminders are scheduled separately from the generic heartbeat so
-		// the periodic heartbeat can stay focused on non-meal background work.
-		for _, reminder := range []struct {
-			name string
-			cron string
-		}{
-			{name: "meal-breakfast", cron: "0 9 * * *"},
-			{name: "meal-lunch", cron: "0 14 * * *"},
-			{name: "meal-dinner", cron: "0 20 * * *"},
-		} {
-			scheduler.Inject(schedule.Job{
-				Name:    reminder.name,
-				Enabled: true,
-				Schedule: schedule.Schedule{
-					Kind: schedule.KindCron,
-					Cron: reminder.cron,
-				},
-				Text: mealPrompt,
-			})
-		}
-		if interval := os.Getenv("YAK_HEARTBEAT_INTERVAL"); interval != "" {
-			d, err := time.ParseDuration(interval)
-			if err != nil || d <= 0 {
-				fmt.Fprintf(os.Stderr, "warning: invalid YAK_HEARTBEAT_INTERVAL %q, heartbeat disabled\n", interval)
-			} else {
-				hbPrompt := "Heartbeat tick: if there is nothing actionable, reply HEARTBEAT_OK."
-				hbCfg = &heartbeatCfg{
-					interval:    d,
-					target:      mealCfg.target,
-					to:          mealCfg.to,
-					prompt:      hbPrompt,
-					model:       mealCfg.model,
-					activeStart: os.Getenv("YAK_HEARTBEAT_ACTIVE_HOURS_START"),
-					activeEnd:   os.Getenv("YAK_HEARTBEAT_ACTIVE_HOURS_END"),
-					timezone:    os.Getenv("YAK_HEARTBEAT_TIMEZONE"),
-				}
-				now := time.Now()
-				scheduler.Inject(schedule.Job{
-					Name:    "heartbeat",
-					Enabled: true,
-					Schedule: schedule.Schedule{
-						Kind:   schedule.KindEvery,
-						Every:  schedule.Duration(d),
-						Anchor: &now,
-					},
-					Text: hbPrompt,
-				})
-			}
-		}
 	}
 
-	// Parse iMessage config early so the send tool can be included in builtinTools.
-	var imsgCfg *imessagechannel.Config
-	if !envEnabled("YAK_IMESSAGE_ENABLED") {
-		fmt.Fprintln(os.Stderr, "iMessage channel disabled via YAK_IMESSAGE_ENABLED")
-	} else if imsgURL := os.Getenv("YAK_IMESSAGE_SERVER_URL"); imsgURL != "" {
-		imsgPassword := os.Getenv("YAK_IMESSAGE_PASSWORD")
-		if imsgPassword == "" {
-			fmt.Fprintf(os.Stderr, "warning: YAK_IMESSAGE_SERVER_URL set but YAK_IMESSAGE_PASSWORD is empty; iMessage channel disabled\n")
-		} else {
-			imsgPort := 8421
-			if p := os.Getenv("YAK_IMESSAGE_WEBHOOK_PORT"); p != "" {
-				if n, err := strconv.Atoi(p); err == nil && n > 0 {
-					imsgPort = n
-				} else {
-					fmt.Fprintf(os.Stderr, "warning: invalid YAK_IMESSAGE_WEBHOOK_PORT %q, using %d\n", p, imsgPort)
-				}
-			}
-			var imsgOwners []string
-			if raw := os.Getenv("YAK_IMESSAGE_OWNER_HANDLES"); raw != "" {
-				for _, h := range strings.Split(raw, ",") {
-					if h = strings.TrimSpace(h); h != "" {
-						imsgOwners = append(imsgOwners, h)
-					}
-				}
-			}
-			cfg := imessagechannel.Config{
-				ServerURL:    imsgURL,
-				Password:     imsgPassword,
-				WebhookPath:  os.Getenv("YAK_IMESSAGE_WEBHOOK_PATH"),
-				WebhookPort:  imsgPort,
-				OwnerHandles: imsgOwners,
-				GroupTag:     os.Getenv("YAK_IMESSAGE_GROUP_TAG"),
-			}
-			imsgCfg = &cfg
-		}
+	hbCfg, err := heartbeatPkg.ConfigFromEnv(os.Getenv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v; heartbeat disabled\n", err)
+	}
+	heartbeatPkg.Register(scheduler, hbCfg, os.Stderr)
+
+	imsgCfg, imsgReason, err := imessagechannel.ConfigFromEnv(os.Getenv, envBool)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v; iMessage channel disabled\n", err)
+	} else if imsgReason != "" {
+		fmt.Fprintf(os.Stderr, "iMessage channel disabled (%s)\n", imsgReason)
 	}
 
-	// Parse Discord config early so the send tool can be included in builtinTools.
-	var discordCfg *discordchannel.Config
-	if !envEnabled("YAK_DISCORD_ENABLED") {
-		fmt.Fprintln(os.Stderr, "Discord channel disabled via YAK_DISCORD_ENABLED")
-	} else if token := os.Getenv("YAK_DISCORD_TOKEN"); token != "" {
-		var owners []string
-		if raw := os.Getenv("YAK_DISCORD_OWNER_IDS"); raw != "" {
-			for _, id := range strings.Split(raw, ",") {
-				if id = strings.TrimSpace(id); id != "" {
-					owners = append(owners, id)
-				}
-			}
-		}
-		cfg := discordchannel.Config{
-			Token:    token,
-			OwnerIDs: owners,
-			GuildTag: os.Getenv("YAK_DISCORD_GUILD_TAG"),
-		}
-		discordCfg = &cfg
+	discordCfg, discReason, err := discordchannel.ConfigFromEnv(os.Getenv, envBool)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v; Discord channel disabled\n", err)
+	} else if discReason != "" {
+		fmt.Fprintf(os.Stderr, "Discord channel disabled (%s)\n", discReason)
 	}
 
 	builtinTools := []tools.Tool{
@@ -289,10 +176,7 @@ func main() {
 		tools.NewFindTool(searchDelegationGuidelines...),
 		tools.NewWebFetchTool(),
 		tools.NewWebSearchTool(),
-		tools.NewMemoryReadTool(memoryStore),
-		tools.NewMemoryWriteTool(memoryStore),
-		tools.NewMemorySearchTool(memoryStore),
-		tools.NewMemoryListTool(memoryStore),
+		tools.NewMemoryTool(memoryStore),
 	}
 	if scheduleStore != nil {
 		builtinTools = append(builtinTools, tools.NewScheduleTool(scheduleStore))
@@ -398,6 +282,37 @@ func main() {
 	// so subagents don't inherit it.
 	allTools = append(allTools, tools.NewSkillWriteTool(projectSkillsDir, skillWriteLogPath, reloadSkills))
 
+	subagentManager, err := subagents.NewManager(
+		func(def subagents.Definition) (llm.ChatClient, error) {
+			u := def.BaseURL
+			if u == "" {
+				u = baseURL
+			}
+			key := apiKey
+			if def.APIKeyEnv != "" {
+				key = os.Getenv(def.APIKeyEnv)
+			}
+			return llm.NewClient(u, def.Model, &llm.Options{
+				Timeout: 300 * time.Second,
+				APIKey:  key,
+			}), nil
+		},
+		sessionDir,
+		defs,
+		builtinTools,
+		baseHooks,
+		runtimePlugins,
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: subagents disabled: %v\n", err)
+	} else {
+		subagentManager.SetBaseObservers(agentStartHooks, agentEndHooks, usageHooks)
+		allTools = append(allTools,
+			subagents.NewSpawnTool(subagentManager),
+			subagents.NewControlTool(subagentManager),
+		)
+	}
+
 	registry := tools.NewRegistry(allTools...)
 	for _, hook := range baseHooks {
 		registry.AddHook(hook)
@@ -435,48 +350,13 @@ func main() {
 		MemoryStore:      memoryStore,
 		Scheduler:        scheduler,
 		Compaction:       compaction.DefaultSettings,
-		HeartbeatEnabled: hbCfg != nil,
+		HeartbeatEnabled: hbCfg.Interval > 0,
 		ClientForModel: func(m string) llm.ChatClient {
 			return llm.NewClient(baseURL, m, &llm.Options{
 				Timeout: 300 * time.Second,
 				APIKey:  apiKey,
 			})
 		},
-	}
-
-	subagentManager, err := subagents.NewManager(
-		func(def subagents.Definition) (llm.ChatClient, error) {
-			u := def.BaseURL
-			if u == "" {
-				u = baseURL
-			}
-			key := apiKey
-			if def.APIKeyEnv != "" {
-				key = os.Getenv(def.APIKeyEnv)
-			}
-			return llm.NewClient(u, def.Model, &llm.Options{
-				Timeout: 300 * time.Second,
-				APIKey:  key,
-			}), nil
-		},
-		sessionDir,
-		defs,
-		builtinTools,
-		baseHooks,
-		runtimePlugins,
-	)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: subagents disabled: %v\n", err)
-	} else {
-		subagentManager.SetBaseObservers(agentStartHooks, agentEndHooks, usageHooks)
-		registry = tools.NewRegistry(append(allTools,
-			subagents.NewSpawnTool(subagentManager),
-			subagents.NewControlTool(subagentManager),
-		)...)
-		for _, hook := range baseHooks {
-			registry.AddHook(hook)
-		}
-		runner.Registry = registry
 	}
 
 	runCtx, cancelRun := context.WithCancel(context.Background())
@@ -505,13 +385,13 @@ func main() {
 			Scheduler: scheduler,
 			Target:    channel.Key{Channel: clichannel.Name, Thread: clichannel.DefaultThread},
 		}
-		if hbCfg != nil {
+		if hbCfg.Interval > 0 {
 			delivery := &sched.HeartbeatDelivery{
-				Target:      hbCfg.target,
-				Model:       hbCfg.model,
-				ActiveStart: hbCfg.activeStart,
-				ActiveEnd:   hbCfg.activeEnd,
-				Timezone:    hbCfg.timezone,
+				Target:      hbCfg.Target,
+				Model:       hbCfg.Model,
+				ActiveStart: hbCfg.ActiveStart,
+				ActiveEnd:   hbCfg.ActiveEnd,
+				Timezone:    hbCfg.Timezone,
 			}
 			// CLISend wraps the CLI channel for heartbeat replies routed to terminal.
 			delivery.CLISend = func(ctx context.Context, content string) error {
@@ -522,10 +402,10 @@ func main() {
 				})
 			}
 			// OutboundSend delivers to the configured messaging channel.
-			switch hbCfg.target {
+			switch hbCfg.Target {
 			case "imessage":
-				if imsgChannel != nil && hbCfg.to != "" {
-					ch, to := imsgChannel, hbCfg.to
+				if imsgChannel != nil && hbCfg.To != "" {
+					ch, to := imsgChannel, hbCfg.To
 					delivery.OutboundSend = func(ctx context.Context, content string) error {
 						return ch.Send(ctx, channel.Outbound{Channel: "imessage", Thread: to, Content: content})
 					}
@@ -533,8 +413,8 @@ func main() {
 					fmt.Fprintf(os.Stderr, "warning: heartbeat target=imessage but iMessage not configured or YAK_HEARTBEAT_TO not set\n")
 				}
 			case "discord":
-				if discordChannel != nil && hbCfg.to != "" {
-					ch, to := discordChannel, hbCfg.to
+				if discordChannel != nil && hbCfg.To != "" {
+					ch, to := discordChannel, hbCfg.To
 					delivery.OutboundSend = func(ctx context.Context, content string) error {
 						return ch.Send(ctx, channel.Outbound{Channel: "discord", Thread: to, Content: content})
 					}
@@ -607,16 +487,18 @@ func formatToolCall(name string, params json.RawMessage) string {
 	return fmt.Sprintf("%s(%s)", name, formatParams(params))
 }
 
-// envEnabled returns true unless the env var is explicitly set to a falsy
-// value (0/false/no/off, case-insensitive). Empty or unset = enabled.
-func envEnabled(name string) bool {
+// envBool returns the boolean value of the named env var, treating empty
+// or unset as def. Malformed values log a warning and fall back to def so
+// typos don't silently flip behavior.
+func envBool(name string, def bool) bool {
 	v := strings.TrimSpace(os.Getenv(name))
 	if v == "" {
-		return true
+		return def
 	}
 	b, err := strconv.ParseBool(v)
 	if err != nil {
-		return true
+		fmt.Fprintf(os.Stderr, "warning: %s=%q is not a valid boolean; using default %v\n", name, v, def)
+		return def
 	}
 	return b
 }
@@ -631,9 +513,11 @@ func nameSet(names []string) map[string]struct{} {
 
 func filterTools(in []tools.Tool, allowed map[string]struct{}) []tools.Tool {
 	if _, ok := allowed["*"]; ok {
-		return in
+		out := make([]tools.Tool, len(in))
+		copy(out, in)
+		return out
 	}
-	filtered := in[:0]
+	filtered := make([]tools.Tool, 0, len(in))
 	for _, t := range in {
 		if _, ok := allowed[t.Definition().Name]; ok {
 			filtered = append(filtered, t)

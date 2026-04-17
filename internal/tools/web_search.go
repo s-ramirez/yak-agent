@@ -41,6 +41,9 @@ var webSearchDefinition = ToolDefinition{
 		},
 		"required": []string{"query"},
 	},
+	SelectionRules: []SelectionRule{
+		{Text: "Use web_search for public web discovery instead of shelling out to ad-hoc search commands."},
+	},
 }
 
 type WebSearchParams struct {

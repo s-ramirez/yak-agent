@@ -49,6 +49,9 @@ var subagentsDefinition = tools.ToolDefinition{
 			"timeout_ms": map[string]any{"type": "integer", "minimum": 0, "description": "Optional wait timeout for action=wait"},
 		},
 	},
+	SelectionRules: []tools.SelectionRule{
+		{Text: "Use subagents to inspect, wait on, or cancel background child runs."},
+	},
 }
 
 func NewSpawnTool(manager *Manager) tools.Tool {
@@ -268,6 +271,11 @@ func buildSessionsSpawnDefinition(defs []Definition) tools.ToolDefinition {
 			},
 			"required": []string{"agent", "task"},
 		},
+		SelectionRules: []tools.SelectionRule{
+			{Text: "Use sessions_spawn when a task can be delegated to a focused helper agent."},
+			{Text: "Always provide the target subagent name and include the necessary context in the delegated task."},
+			{Text: "Default to wait=true unless parallel progress is important."},
+		},
 	}
 }
 
@@ -289,10 +297,5 @@ func truncate(value string, limit int) string {
 	return value[:limit] + "..."
 }
 
-func errResult(msg string) tools.ToolResult {
-	return tools.ToolResult{Output: "error: " + msg, IsError: true}
-}
-
-func errResultf(format string, args ...any) tools.ToolResult {
-	return errResult(fmt.Sprintf(format, args...))
-}
+func errResult(msg string) tools.ToolResult               { return tools.ErrorResult(msg) }
+func errResultf(format string, a ...any) tools.ToolResult { return tools.ErrorResultf(format, a...) }

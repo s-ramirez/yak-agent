@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -75,6 +76,49 @@ type Channel struct {
 	seenIDs map[string]struct{} // message GUIDs already dispatched this session
 	pendMu  sync.Mutex
 	pending map[string]chan msgPart // per-thread debounce channels
+}
+
+// ConfigFromEnv reads YAK_IMESSAGE_* environment variables and returns a
+// populated Config along with a status reason. The channel is disabled
+// when YAK_IMESSAGE_ENABLED is false, when the URL is missing, or when
+// the password is missing (in which case an error is returned so the
+// caller can surface a warning).
+func ConfigFromEnv(getenv func(string) string, parseBool func(name string, def bool) bool) (*Config, string, error) {
+	if !parseBool("YAK_IMESSAGE_ENABLED", true) {
+		return nil, "YAK_IMESSAGE_ENABLED=false", nil
+	}
+	url := strings.TrimSpace(getenv("YAK_IMESSAGE_SERVER_URL"))
+	if url == "" {
+		return nil, "", nil
+	}
+	password := getenv("YAK_IMESSAGE_PASSWORD")
+	if password == "" {
+		return nil, "", fmt.Errorf("YAK_IMESSAGE_SERVER_URL set but YAK_IMESSAGE_PASSWORD is empty")
+	}
+	port := 8421
+	if raw := getenv("YAK_IMESSAGE_WEBHOOK_PORT"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			port = n
+		} else {
+			return nil, "", fmt.Errorf("invalid YAK_IMESSAGE_WEBHOOK_PORT %q", raw)
+		}
+	}
+	var owners []string
+	if raw := getenv("YAK_IMESSAGE_OWNER_HANDLES"); raw != "" {
+		for _, h := range strings.Split(raw, ",") {
+			if h = strings.TrimSpace(h); h != "" {
+				owners = append(owners, h)
+			}
+		}
+	}
+	return &Config{
+		ServerURL:    url,
+		Password:     password,
+		WebhookPath:  getenv("YAK_IMESSAGE_WEBHOOK_PATH"),
+		WebhookPort:  port,
+		OwnerHandles: owners,
+		GroupTag:     getenv("YAK_IMESSAGE_GROUP_TAG"),
+	}, "", nil
 }
 
 // New returns a new Channel with the given configuration.

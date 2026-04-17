@@ -15,6 +15,21 @@ type ToolDefinition struct {
 	Description string
 	Guidelines  []string
 	Parameters  JSONSchema
+
+	// SelectionRules are one-line hints the system prompt emits under
+	// `# Tool selection`. Each rule may declare additional tool names it
+	// requires to also be available (see SelectionRule.Requires); rules
+	// whose requirements are unmet are silently omitted. This lets each
+	// tool carry its own selection guidance without a central switch.
+	SelectionRules []SelectionRule
+}
+
+// SelectionRule is one bullet emitted in the system prompt's tool-selection
+// section. Requires names other tools that must be present for the rule to
+// apply (e.g. the "always read before edit" rule needs both read and edit).
+type SelectionRule struct {
+	Text     string
+	Requires []string
 }
 
 type ToolResult struct {
@@ -27,16 +42,24 @@ type Tool interface {
 	Execute(ctx context.Context, params json.RawMessage) (ToolResult, error)
 }
 
-func errorResult(message string) ToolResult {
+// ErrorResult builds an IsError tool result with a leading "error: " prefix.
+// Exported so callers outside this package (subagents, plugin tools) share
+// the same shape.
+func ErrorResult(message string) ToolResult {
 	return ToolResult{
 		Output:  "error: " + message,
 		IsError: true,
 	}
 }
 
-func errorResultf(format string, args ...any) ToolResult {
-	return errorResult(fmt.Sprintf(format, args...))
+// ErrorResultf is the fmt.Sprintf flavor of ErrorResult.
+func ErrorResultf(format string, args ...any) ToolResult {
+	return ErrorResult(fmt.Sprintf(format, args...))
 }
+
+// package-internal aliases keep the existing call sites terse.
+func errorResult(message string) ToolResult           { return ErrorResult(message) }
+func errorResultf(format string, a ...any) ToolResult { return ErrorResultf(format, a...) }
 
 // shouldSkipDir reports whether a directory name should be skipped when walking
 // the filesystem for grep, find, etc.

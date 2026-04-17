@@ -52,6 +52,9 @@ func NewGrepTool(extraGuidelines ...string) *GrepTool {
 				},
 				"required": []string{"pattern"},
 			},
+			SelectionRules: []SelectionRule{
+				{Text: "Use grep to search file contents for patterns instead of running grep via bash."},
+			},
 		},
 	}
 }

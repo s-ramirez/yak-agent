@@ -17,6 +17,13 @@ type Conversation struct {
 	// inbound message and cleared after the turn. The turn handler may
 	// use it to switch models for a single turn (e.g. heartbeat runs).
 	ModelOverride string
+
+	// Compaction state scoped to this conversation. The runner reads and
+	// writes these between turns so multi-channel traffic does not cross-
+	// contaminate each other's token accounting.
+	LastSummary    string
+	LastUsage      *types.Usage
+	LastUsageIndex int // -1 means "no authoritative prefix yet"
 }
 
 // Store is an in-memory map of conversations keyed by (channel, thread).
@@ -37,7 +44,7 @@ func (s *Store) Get(key Key) *Conversation {
 	defer s.mu.Unlock()
 	conv, ok := s.convs[key]
 	if !ok {
-		conv = &Conversation{Key: key}
+		conv = &Conversation{Key: key, LastUsageIndex: -1}
 		s.convs[key] = conv
 	}
 	return conv

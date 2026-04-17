@@ -30,6 +30,10 @@ var bashDefinition = ToolDefinition{
 		},
 		"required": []string{"command"},
 	},
+	SelectionRules: []SelectionRule{
+		{Text: "Use bash to run shell commands when you need command output, tests, or build results."},
+		{Text: "Prefer bash over guessing command results."},
+	},
 }
 
 type BashParams struct {

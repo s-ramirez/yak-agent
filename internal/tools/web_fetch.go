@@ -46,6 +46,10 @@ var webFetchDefinition = ToolDefinition{
 		},
 		"required": []string{"url"},
 	},
+	SelectionRules: []SelectionRule{
+		{Text: "Use web_fetch to read a specific web page when you already have a URL."},
+		{Text: "For web research, use web_search to find candidate pages and web_fetch to read the most relevant ones.", Requires: []string{"web_search"}},
+	},
 }
 
 type WebFetchParams struct {

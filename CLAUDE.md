@@ -14,6 +14,8 @@ go test -v ./...            # Verbose output
 
 Run the CLI: `go run ./cmd/yak` (requires an OpenAI-compatible API, defaults to `http://localhost:1234`).
 
+Bootstrap a project workspace: `go run ./cmd/yak init` scaffolds `.yak/` with default `AGENTS.md`, `IDENTITY.md`, `USER.md`, and memory/skills directories from the embedded templates under `cmd/yak/templates/`.
+
 Environment variables: `YAK_BASE_URL` (API endpoint), `YAK_MODEL` (model name, default `"default"`).
 
 Heartbeat environment variables (all optional; heartbeat is disabled unless `YAK_HEARTBEAT_INTERVAL` is set):
