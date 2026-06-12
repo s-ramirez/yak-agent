@@ -32,7 +32,7 @@ tools: ["*"]
 
 - Runtime baseline: Go **1.26.1+**.
 - Build: `go build ./...`
-- Run CLI: `go run ./cmd/yak` (requires an OpenAI-compatible API; defaults to `http://localhost:1234`).
+- Run CLI: `go run ./cmd/yak` (defaults to the OpenAI API).
 - Full test suite: `go test ./...`
 - Single package: `go test ./internal/tools/`
 - Single test: `go test ./internal/tools/ -run TestGrepToolFindsPattern`
@@ -44,7 +44,7 @@ tools: ["*"]
 
 ## Environment Variables
 
-- Core: `YAK_BASE_URL` (default `http://localhost:1234`), `YAK_MODEL` (default `google/gemma-4-12b-qat`), `YAK_API_KEY` (optional bearer), `YAK_LLM_TIMEOUT` (default `5m`), `YAK_SUBAGENT_LLM_TIMEOUT` (default: same as `YAK_LLM_TIMEOUT`), `YAK_WEBUI_PORT`, `YAK_LOG_DIR`, `YAK_HEARTBEAT_INTERVAL`.
+- Core: `YAK_BASE_URL` (default `https://api.openai.com`), `YAK_MODEL` (default `gpt-5.4`), `YAK_API_KEY` (optional bearer), `YAK_LLM_TIMEOUT` (default `5m`), `YAK_SUBAGENT_LLM_TIMEOUT` (default: same as `YAK_LLM_TIMEOUT`), `YAK_WEBUI_PORT`, `YAK_LOG_DIR`, `YAK_HEARTBEAT_INTERVAL`.
 - iMessage (BlueBubbles): `YAK_IMESSAGE_ENABLED`, `YAK_IMESSAGE_SERVER_URL`, `YAK_IMESSAGE_PASSWORD`, `YAK_IMESSAGE_WEBHOOK_PORT`, `YAK_IMESSAGE_WEBHOOK_PATH`, `YAK_IMESSAGE_OWNER_HANDLES`, `YAK_IMESSAGE_GROUP_TAG`.
 - Discord: `YAK_DISCORD_ENABLED`, `YAK_DISCORD_TOKEN`, `YAK_DISCORD_OWNER_IDS`, `YAK_DISCORD_GUILD_TAG`.
 - Web search: `YAK_BRAVE_API_KEY` or `BRAVE_API_KEY`.
