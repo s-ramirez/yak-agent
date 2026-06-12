@@ -12,11 +12,11 @@ go test ./internal/tools/ -run TestGrepToolFindsPattern  # Run a single test
 go test -v ./...            # Verbose output
 ```
 
-Run the CLI: `go run ./cmd/yak` (requires an OpenAI-compatible API, defaults to `http://localhost:1234`).
+Run the CLI: `go run ./cmd/yak` (defaults to the OpenAI API).
 
 Bootstrap a project workspace: `go run ./cmd/yak init` scaffolds `.yak/` with default `AGENTS.md`, `IDENTITY.md`, `USER.md`, and memory/skills directories from the embedded templates under `cmd/yak/templates/`.
 
-Environment variables: `YAK_BASE_URL` (API endpoint), `YAK_MODEL` (model name, default `"google/gemma-4-12b-qat"`), `YAK_LLM_TIMEOUT` (default `5m`), and `YAK_SUBAGENT_LLM_TIMEOUT` (default: same as `YAK_LLM_TIMEOUT`).
+Environment variables: `YAK_BASE_URL` (API endpoint, default `https://api.openai.com`), `YAK_MODEL` (model name, default `"gpt-5.4"`), `YAK_LLM_TIMEOUT` (default `5m`), and `YAK_SUBAGENT_LLM_TIMEOUT` (default: same as `YAK_LLM_TIMEOUT`).
 
 Heartbeat environment variables (all optional; heartbeat is disabled unless `YAK_HEARTBEAT_INTERVAL` is set):
 `YAK_HEARTBEAT_INTERVAL` (Go duration, e.g. `15m`), `YAK_HEARTBEAT_TARGET` (default `cli`; `cli` | `imessage` | `discord` | `none`), `YAK_HEARTBEAT_TO` (recipient handle/channel ID for non-CLI targets), `YAK_HEARTBEAT_MODEL` (model override for heartbeat turns; empty = same as default), `YAK_HEARTBEAT_PROMPT` (custom prompt text), `YAK_HEARTBEAT_ACTIVE_HOURS_START` / `YAK_HEARTBEAT_ACTIVE_HOURS_END` (`HH:MM` 24h window; both must be set), `YAK_HEARTBEAT_TIMEZONE` (IANA name; empty = local). When the model has nothing to report it should respond with `HEARTBEAT_OK` — this suppresses delivery and prunes the turn from history.

@@ -48,12 +48,12 @@ func main() {
 
 	baseURL := os.Getenv("YAK_BASE_URL")
 	if baseURL == "" {
-		baseURL = "http://localhost:1234"
+		baseURL = "https://api.openai.com"
 	}
 
 	model := os.Getenv("YAK_MODEL")
 	if model == "" {
-		model = "google/gemma-4-12b-qat"
+		model = "gpt-5.4"
 	}
 
 	apiKey := os.Getenv("YAK_API_KEY")
@@ -74,10 +74,11 @@ func main() {
 		if baseURL == "" {
 			baseURL = os.Getenv("YAK_BASE_URL")
 			if baseURL == "" {
-				baseURL = "http://localhost:1234"
+				baseURL = "https://api.openai.com"
 			}
 		}
 		model = agentCfg.Model
+		apiKey = ""
 		if agentCfg.APIKeyEnv != "" {
 			apiKey = os.Getenv(agentCfg.APIKeyEnv)
 		}

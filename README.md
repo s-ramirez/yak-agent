@@ -3,7 +3,7 @@
 ## Features
 
 - Interactive CLI loop with an agentic tool-use cycle
-- LM Studio-compatible `/v1/chat/completions` client
+- OpenAI-compatible `/v1/chat/completions` client
 - Optional bearer-token auth for OpenAI-compatible endpoints
 - Dynamic system prompt with environment info and tool-selection rules
 - Built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `ls`, `find`, `web_fetch`, `web_search`
@@ -13,7 +13,7 @@
 ## Prerequisites
 
 - Go 1.26.1 or later
-- An OpenAI-compatible chat completions API (e.g. LM Studio running locally)
+- An OpenAI API key, or another OpenAI-compatible chat completions API
 
 ## Running
 
@@ -21,7 +21,7 @@
 go run ./cmd/yak
 ```
 
-By default the CLI connects to a local LM Studio instance. Configure with
+By default the CLI connects to OpenAI using `gpt-5.4`. Configure with
 environment variables. The CLI also loads a local `.env` file automatically,
 which is useful for development defaults:
 
@@ -34,8 +34,8 @@ Available settings:
 
 | Variable            | Default                     | Description                                           |
 |---------------------|-----------------------------|-------------------------------------------------------|
-| `YAK_BASE_URL`      | `http://localhost:1234`     | Base URL of the chat completions API                  |
-| `YAK_MODEL`         | `google/gemma-4-12b-qat`    | Model name to use in API requests                     |
+| `YAK_BASE_URL`      | `https://api.openai.com`    | Base URL of the chat completions API                  |
+| `YAK_MODEL`         | `gpt-5.4`                   | Model name to use in API requests                     |
 | `YAK_API_KEY`       | unset                       | Optional bearer token for authenticated APIs          |
 | `YAK_LLM_TIMEOUT`   | `5m`                        | Timeout for primary and heartbeat LLM requests        |
 | `YAK_SUBAGENT_LLM_TIMEOUT` | `YAK_LLM_TIMEOUT` | Timeout for sub-agent LLM requests                    |
@@ -71,12 +71,12 @@ own provider via three frontmatter fields:
 | `api_key_env` | Name of an env var holding the API key (resolved at spawn time)          |
 
 If `base_url` is omitted, the global `YAK_BASE_URL` is used. If `api_key_env`
-is set but the env var is empty, no `Authorization` header is sent (LM Studio
-works this way). Put secrets in `.env` and reference them by env var name —
+is set but the env var is empty, no `Authorization` header is sent. Put
+secrets in `.env` and reference them by env var name —
 never commit keys.
 
 Example sub-agents shipped in `.yak/subagents/`: `gpt.md` (OpenAI),
-`fireworks.md` (Fireworks), `local.md` (LM Studio).
+`fireworks.md` (Fireworks), `local.md` (OMLX).
 
 `.env`:
 
@@ -92,7 +92,8 @@ orchestrator. Same frontmatter as sub-agents, plus the body becomes a
 `# Personality` section appended to the auto-built system prompt.
 
 `tools` and `model` are required. `tools` filters the available builtin and
-plugin tools; `plugins` (optional) restricts which plugins load.
+plugin tools; `plugins` (optional) restricts which plugins load. When
+`api_key_env` is omitted, the main agent sends no `Authorization` header.
 
 ```yaml
 ---
