@@ -168,6 +168,7 @@ func formatRunList(runs []RunSnapshot) string {
 		return runs[i].CreatedAt.Before(runs[j].CreatedAt)
 	})
 
+	now := time.Now()
 	lines := make([]string, 0, len(runs))
 	for _, run := range runs {
 		line := fmt.Sprintf("%s [%s] %s", run.RunID, run.Status, run.Agent)
@@ -177,12 +178,47 @@ func formatRunList(runs []RunSnapshot) string {
 		if run.Task != "" {
 			line += " - " + truncate(run.Task, 80)
 		}
+		if timing := formatTiming(run, now); timing != "" {
+			line += " " + timing
+		}
 		if usage := formatUsage(run); usage != "" {
 			line += " " + usage
 		}
 		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func formatTiming(snapshot RunSnapshot, now time.Time) string {
+	parts := make([]string, 0, 2)
+	if snapshot.StartedAt != nil {
+		end := now
+		if snapshot.CompletedAt != nil {
+			end = *snapshot.CompletedAt
+		}
+		parts = append(parts, fmt.Sprintf("elapsed=%s", roundDuration(end.Sub(*snapshot.StartedAt))))
+	}
+	if snapshot.LastActivityAt != nil && snapshot.CompletedAt == nil {
+		parts = append(parts, fmt.Sprintf("last_activity=%s_ago", roundDuration(now.Sub(*snapshot.LastActivityAt))))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "[" + strings.Join(parts, " ") + "]"
+}
+
+func roundDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Second:
+		return d.Round(100 * time.Millisecond)
+	case d < time.Minute:
+		return d.Round(time.Second)
+	default:
+		return d.Round(time.Minute)
+	}
 }
 
 func formatUsage(snapshot RunSnapshot) string {

@@ -15,7 +15,17 @@ import (
 // tool. All paths are relative to .yak/memory/; the store enforces the
 // sandbox.
 type memoryTool struct {
-	store *memory.Store
+	store   *memory.Store
+	resolve func() *memory.Store
+}
+
+func (t *memoryTool) active() *memory.Store {
+	if t.resolve != nil {
+		if s := t.resolve(); s != nil {
+			return s
+		}
+	}
+	return t.store
 }
 
 // MemoryParams carries arguments for every action. Only the fields that
@@ -76,6 +86,14 @@ var memoryDefinition = ToolDefinition{
 // NewMemoryTool returns the unified memory tool.
 func NewMemoryTool(store *memory.Store) Tool { return &memoryTool{store: store} }
 
+// NewMemoryToolResolving returns a memory tool that resolves its store
+// per call via resolve(). When resolve returns nil the tool falls back
+// to the fallback store. This lets callers route reads/writes to a
+// per-conversation store while keeping a sensible default.
+func NewMemoryToolResolving(resolve func() *memory.Store, fallback *memory.Store) Tool {
+	return &memoryTool{store: fallback, resolve: resolve}
+}
+
 func (t *memoryTool) Definition() ToolDefinition { return memoryDefinition }
 
 func (t *memoryTool) Execute(_ context.Context, raw json.RawMessage) (ToolResult, error) {
@@ -102,7 +120,7 @@ func (t *memoryTool) read(p MemoryParams) ToolResult {
 	if strings.TrimSpace(p.Path) == "" {
 		return errorResult("path is required for action=read")
 	}
-	data, err := t.store.Read(p.Path)
+	data, err := t.active().Read(p.Path)
 	if err != nil {
 		return errorResultf("memory file not found or unreadable: %s", p.Path)
 	}
@@ -147,7 +165,7 @@ func (t *memoryTool) write(p MemoryParams) ToolResult {
 	default:
 		return errorResultf("mode must be \"overwrite\" or \"append\", got %q", p.Mode)
 	}
-	if err := t.store.Write(p.Path, []byte(p.Content), appendMode); err != nil {
+	if err := t.active().Write(p.Path, []byte(p.Content), appendMode); err != nil {
 		return errorResultf("%v", err)
 	}
 	verb := "wrote"
@@ -162,7 +180,7 @@ func (t *memoryTool) write(p MemoryParams) ToolResult {
 }
 
 func (t *memoryTool) search(p MemoryParams) ToolResult {
-	hits, err := t.store.Search(p.Query, p.MaxResults)
+	hits, err := t.active().Search(p.Query, p.MaxResults)
 	if err != nil {
 		return errorResult(err.Error())
 	}
@@ -177,7 +195,7 @@ func (t *memoryTool) search(p MemoryParams) ToolResult {
 }
 
 func (t *memoryTool) list(p MemoryParams) ToolResult {
-	entries, err := t.store.List(p.Dir)
+	entries, err := t.active().List(p.Dir)
 	if err != nil {
 		return errorResult(err.Error())
 	}
