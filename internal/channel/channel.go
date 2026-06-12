@@ -33,6 +33,10 @@ type Inbound struct {
 	Kind       Kind
 	ReceivedAt time.Time
 
+	// Participants lists other handles reachable in this thread (e.g. members
+	// of an iMessage group chat). Empty for DMs / channels with no roster.
+	Participants []string
+
 	// InterceptReply, if non-nil, is called by the dispatcher instead of
 	// Channel.Send when the runner produces a reply for this message.
 	// Returning pruneLastTurn=true causes the dispatcher to truncate

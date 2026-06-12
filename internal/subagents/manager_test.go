@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"yak-go/internal/llm"
 	"yak-go/internal/tools"
@@ -60,6 +61,17 @@ func TestManagerLogsSubagentTranscripts(t *testing.T) {
 		t.Fatalf("expected completed status, got %q", result.Status)
 	}
 
+	snapshots := manager.List()
+	if len(snapshots) != 1 {
+		t.Fatalf("expected one snapshot, got %d", len(snapshots))
+	}
+	if snapshots[0].StartedAt == nil {
+		t.Fatalf("expected StartedAt to be set")
+	}
+	if snapshots[0].LastActivityAt == nil {
+		t.Fatalf("expected LastActivityAt to be set")
+	}
+
 	subagentRoot := filepath.Join(logDir, "subagents")
 	entries, err := os.ReadDir(subagentRoot)
 	if err != nil {
@@ -78,5 +90,29 @@ func TestManagerLogsSubagentTranscripts(t *testing.T) {
 	}
 	if len(files) != 2 {
 		t.Fatalf("expected request/response logs, got %d files", len(files))
+	}
+}
+
+func TestFormatRunListIncludesTiming(t *testing.T) {
+	now := time.Now()
+	started := now.Add(-5 * time.Minute)
+	lastActivity := now.Add(-30 * time.Second)
+	output := formatRunList([]RunSnapshot{{
+		RunID:            "subagent-1",
+		Agent:            "rocky",
+		Status:           "running",
+		Task:             "test task",
+		CreatedAt:        started,
+		StartedAt:        &started,
+		LastActivityAt:   &lastActivity,
+		NumLLMCalls:      2,
+		LastPromptTokens: 120,
+		TotalTokens:      240,
+	}})
+	if !strings.Contains(output, "elapsed=") {
+		t.Fatalf("expected elapsed timing in output: %q", output)
+	}
+	if !strings.Contains(output, "last_activity=") {
+		t.Fatalf("expected last_activity timing in output: %q", output)
 	}
 }

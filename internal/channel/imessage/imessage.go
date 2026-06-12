@@ -62,8 +62,9 @@ type Config struct {
 
 // msgPart is a single inbound message fragment waiting to be debounced.
 type msgPart struct {
-	text   string
-	sender string
+	text         string
+	sender       string
+	participants []string
 }
 
 // defaultDebounceDelay is how long to wait for follow-up messages before dispatching.
@@ -323,8 +324,20 @@ func (c *Channel) makeHandler(ctx context.Context, out chan<- channel.Inbound) h
 			}
 		}
 
-		log("webhook: accepted message from %q (chat=%s, group=%v): %q", sender, chatGUID, isGroup, text)
-		c.enqueue(ctx, chatGUID, sender, text, out)
+		var participants []string
+		if isGroup {
+			// Exclude the sender from the roster — callers typically want
+			// "who else is here" for DM fan-out or mentions.
+			for _, h := range payload.participants() {
+				if h == sender {
+					continue
+				}
+				participants = append(participants, h)
+			}
+		}
+
+		log("webhook: accepted message from %q (chat=%s, group=%v, participants=%d): %q", sender, chatGUID, isGroup, len(participants), text)
+		c.enqueue(ctx, chatGUID, sender, text, participants, out)
 		w.WriteHeader(http.StatusOK)
 	}
 }
@@ -332,7 +345,7 @@ func (c *Channel) makeHandler(ctx context.Context, out chan<- channel.Inbound) h
 // enqueue routes an inbound message through the per-thread debounce worker.
 // Messages that arrive within debounceDelay of each other are accumulated and
 // dispatched as a single combined message.
-func (c *Channel) enqueue(ctx context.Context, chatGUID, sender, text string, out chan<- channel.Inbound) {
+func (c *Channel) enqueue(ctx context.Context, chatGUID, sender, text string, participants []string, out chan<- channel.Inbound) {
 	c.pendMu.Lock()
 	ch, exists := c.pending[chatGUID]
 	if !exists {
@@ -343,7 +356,7 @@ func (c *Channel) enqueue(ctx context.Context, chatGUID, sender, text string, ou
 	c.pendMu.Unlock()
 
 	select {
-	case ch <- msgPart{text: text, sender: sender}:
+	case ch <- msgPart{text: text, sender: sender, participants: participants}:
 	case <-ctx.Done():
 	}
 }
@@ -368,6 +381,7 @@ func (c *Channel) debounceWorker(ctx context.Context, chatGUID string, ch <-chan
 
 	var parts []string
 	var sender string
+	var participants []string
 	var timer <-chan time.Time
 
 	for {
@@ -376,18 +390,27 @@ func (c *Channel) debounceWorker(ctx context.Context, chatGUID string, ch <-chan
 			if sender == "" {
 				sender = part.sender
 			}
+			if len(part.participants) > 0 {
+				participants = part.participants
+			}
 			parts = append(parts, part.text)
 			timer = time.After(c.debounce())
 		case <-timer:
+			body := strings.Join(parts, "\n")
+			content := body
+			if len(participants) > 0 {
+				content = fmt.Sprintf("[group participants: %s]\n%s", strings.Join(participants, ", "), body)
+			}
 			select {
 			case <-ctx.Done():
 			case out <- channel.Inbound{
-				Channel:    channelName,
-				Thread:     chatGUID,
-				Sender:     sender,
-				Content:    strings.Join(parts, "\n"),
-				Kind:       channel.KindUser,
-				ReceivedAt: time.Now(),
+				Channel:      channelName,
+				Thread:       chatGUID,
+				Sender:       sender,
+				Content:      content,
+				Kind:         channel.KindUser,
+				ReceivedAt:   time.Now(),
+				Participants: participants,
 			}:
 			}
 			return
@@ -432,22 +455,22 @@ func checkPassword(r *http.Request, want []byte) bool {
 // webhookPayload is a loose representation of the JSON that BlueBubbles POSTs.
 // Fields use raw json.RawMessage so we can handle both object and string forms.
 type webhookPayload struct {
-	Type   string          `json:"type"`
-	Data   json.RawMessage `json:"data"`
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
 	// Top-level fallbacks for servers that hoist fields.
-	Text       string          `json:"text"`
-	IsFromMe   bool            `json:"isFromMe"`
-	FromMe     bool            `json:"from_me"`
-	ChatGUID   string          `json:"chatGuid"`
-	Handle     json.RawMessage `json:"handle"`
-}
-
-type messageData struct {
-	GUID     string          `json:"guid"`
 	Text     string          `json:"text"`
 	IsFromMe bool            `json:"isFromMe"`
 	FromMe   bool            `json:"from_me"`
-	Outgoing bool            `json:"outgoing"`
+	ChatGUID string          `json:"chatGuid"`
+	Handle   json.RawMessage `json:"handle"`
+}
+
+type messageData struct {
+	GUID     string `json:"guid"`
+	Text     string `json:"text"`
+	IsFromMe bool   `json:"isFromMe"`
+	FromMe   bool   `json:"from_me"`
+	Outgoing bool   `json:"outgoing"`
 	// BlueBubbles puts the chatGuid directly on the message.
 	ChatGUID string    `json:"chatGuid"`
 	Chat     *chatData `json:"chat"`
@@ -462,6 +485,9 @@ type chatData struct {
 	ChatGUID string `json:"chatGuid"`
 	// Style 43 = group chat in imessage-rs / macOS chat.db.
 	Style int `json:"style"`
+	// Participants carries the group roster. Each entry may be a plain
+	// string handle or an object with one of {"address","id","handle"}.
+	Participants []json.RawMessage `json:"participants"`
 }
 
 func (p *webhookPayload) message() *messageData {
@@ -521,6 +547,72 @@ func (p *webhookPayload) chatGUID() string {
 		}
 	}
 	return p.ChatGUID
+}
+
+// participants returns the normalized handles of every group member listed
+// on the message's chat entry. Order is preserved; duplicates are removed.
+func (p *webhookPayload) participants() []string {
+	m := p.message()
+	if m == nil {
+		return nil
+	}
+	var raw []json.RawMessage
+	switch {
+	case len(m.Chats) > 0 && len(m.Chats[0].Participants) > 0:
+		raw = m.Chats[0].Participants
+	case m.Chat != nil && len(m.Chat.Participants) > 0:
+		raw = m.Chat.Participants
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, r := range raw {
+		h := extractHandle(r)
+		if h == "" {
+			continue
+		}
+		h = normalizeHandle(h)
+		if h == "" {
+			continue
+		}
+		if _, dup := seen[h]; dup {
+			continue
+		}
+		seen[h] = struct{}{}
+		out = append(out, h)
+	}
+	return out
+}
+
+// extractHandle pulls a handle out of a JSON value that may be either a
+// bare string ("+15551234567") or an object with one of the common handle
+// fields used by BlueBubbles and imessage-rs.
+func extractHandle(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var obj struct {
+		Address string `json:"address"`
+		ID      string `json:"id"`
+		Handle  string `json:"handle"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		switch {
+		case obj.Address != "":
+			return obj.Address
+		case obj.ID != "":
+			return obj.ID
+		case obj.Handle != "":
+			return obj.Handle
+		}
+	}
+	return ""
 }
 
 // isGroupChat returns true when the chat is a group conversation.

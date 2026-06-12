@@ -46,6 +46,7 @@ type RunSnapshot struct {
 	CreatedAt        time.Time
 	StartedAt        *time.Time
 	CompletedAt      *time.Time
+	LastActivityAt   *time.Time
 	ContextSize      int
 	LastPromptTokens int
 	LastTotalTokens  int
@@ -60,18 +61,18 @@ type childRun struct {
 }
 
 type Manager struct {
-	clientFactory    ClientFactory
-	logDir           string
-	builtinTools     []tools.Tool
-	baseHooks        []tools.ToolHook
-	baseAgentStart   []plugin.AgentStartHook
-	baseAgentEnd     []plugin.AgentEndHook
-	baseUsage        []plugin.UsageHook
-	plugins          map[string]RuntimePlugin
-	definitions      map[string]Definition
-	runs             map[string]*childRun
-	nextID           uint64
-	mu               sync.RWMutex
+	clientFactory  ClientFactory
+	logDir         string
+	builtinTools   []tools.Tool
+	baseHooks      []tools.ToolHook
+	baseAgentStart []plugin.AgentStartHook
+	baseAgentEnd   []plugin.AgentEndHook
+	baseUsage      []plugin.UsageHook
+	plugins        map[string]RuntimePlugin
+	definitions    map[string]Definition
+	runs           map[string]*childRun
+	nextID         uint64
+	mu             sync.RWMutex
 }
 
 // SetBaseObservers installs observation hooks that apply to every subagent
@@ -232,10 +233,10 @@ func (m *Manager) Kill(runID string) (RunSnapshot, error) {
 }
 
 type runtimeHooks struct {
-	afterTurn   []plugin.AfterTurnHook
-	agentStart  []plugin.AgentStartHook
-	agentEnd    []plugin.AgentEndHook
-	usage       []plugin.UsageHook
+	afterTurn  []plugin.AfterTurnHook
+	agentStart []plugin.AgentStartHook
+	agentEnd   []plugin.AgentEndHook
+	usage      []plugin.UsageHook
 }
 
 func (m *Manager) buildRuntime(def Definition) (*tools.Registry, []string, runtimeHooks, error) {
@@ -327,6 +328,7 @@ func (m *Manager) execute(run *childRun, req SpawnRequest, def Definition) {
 	startedAt := time.Now()
 	m.update(run.snapshot.RunID, func(snapshot *RunSnapshot) {
 		snapshot.StartedAt = &startedAt
+		snapshot.LastActivityAt = &startedAt
 	})
 
 	client, err := m.clientFactory(def)
@@ -382,11 +384,13 @@ func (m *Manager) execute(run *childRun, req SpawnRequest, def Definition) {
 			if usage == nil {
 				return
 			}
+			now := time.Now()
 			m.update(runID, func(snapshot *RunSnapshot) {
 				snapshot.NumLLMCalls++
 				snapshot.LastPromptTokens = usage.PromptTokens
 				snapshot.LastTotalTokens = usage.TotalTokens
 				snapshot.TotalTokens += usage.TotalTokens
+				snapshot.LastActivityAt = &now
 			})
 		},
 	}

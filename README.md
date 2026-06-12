@@ -32,15 +32,17 @@ YAK_LOG_DIR=.yak/logs
 
 Available settings:
 
-| Variable        | Default                 | Description                                 |
-|-----------------|-------------------------|---------------------------------------------|
-| `YAK_BASE_URL`  | `http://localhost:1234` | Base URL of the chat completions API        |
-| `YAK_MODEL`     | `default`               | Model name to use in API requests           |
-| `YAK_API_KEY`   | unset                   | Optional bearer token for authenticated APIs |
-| `YAK_WEBUI_PORT`| `8420`                  | Enables the web UI plugin on the given port |
-| `YAK_LOG_DIR`   | unset                   | Writes session logs under a timestamped subdirectory |
-| `YAK_BRAVE_API_KEY` | unset               | Brave Search API key for the `web_search` tool        |
-| `BRAVE_API_KEY` | unset                   | Alternate Brave Search API key env var                |
+| Variable            | Default                     | Description                                           |
+|---------------------|-----------------------------|-------------------------------------------------------|
+| `YAK_BASE_URL`      | `http://localhost:1234`     | Base URL of the chat completions API                  |
+| `YAK_MODEL`         | `google/gemma-4-12b-qat`    | Model name to use in API requests                     |
+| `YAK_API_KEY`       | unset                       | Optional bearer token for authenticated APIs          |
+| `YAK_LLM_TIMEOUT`   | `5m`                        | Timeout for primary and heartbeat LLM requests        |
+| `YAK_SUBAGENT_LLM_TIMEOUT` | `YAK_LLM_TIMEOUT` | Timeout for sub-agent LLM requests                    |
+| `YAK_WEBUI_PORT`    | `8420`                      | Enables the web UI plugin on the given port           |
+| `YAK_LOG_DIR`       | unset                       | Writes session logs under a timestamped subdirectory  |
+| `YAK_BRAVE_API_KEY` | unset                       | Brave Search API key for the `web_search` tool        |
+| `BRAVE_API_KEY`     | unset                       | Alternate Brave Search API key env var                |
 
 Example with a custom endpoint:
 

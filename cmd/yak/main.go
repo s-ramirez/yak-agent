@@ -53,7 +53,7 @@ func main() {
 
 	model := os.Getenv("YAK_MODEL")
 	if model == "" {
-		model = "default"
+		model = "google/gemma-4-12b-qat"
 	}
 
 	apiKey := os.Getenv("YAK_API_KEY")
@@ -83,8 +83,11 @@ func main() {
 		}
 	}
 
+	llmTimeout := envDuration("YAK_LLM_TIMEOUT", 300*time.Second)
+	subagentLLMTimeout := envDuration("YAK_SUBAGENT_LLM_TIMEOUT", llmTimeout)
+
 	client := llm.NewClient(baseURL, model, &llm.Options{
-		Timeout: 300 * time.Second,
+		Timeout: llmTimeout,
 		APIKey:  apiKey,
 	})
 
@@ -316,7 +319,7 @@ func main() {
 				key = os.Getenv(def.APIKeyEnv)
 			}
 			return llm.NewClient(u, def.Model, &llm.Options{
-				Timeout: 300 * time.Second,
+				Timeout: subagentLLMTimeout,
 				APIKey:  key,
 			}), nil
 		},
@@ -376,7 +379,7 @@ func main() {
 		HeartbeatEnabled: hbCfg.Interval > 0,
 		ClientForModel: func(m string) llm.ChatClient {
 			return llm.NewClient(baseURL, m, &llm.Options{
-				Timeout: 300 * time.Second,
+				Timeout: llmTimeout,
 				APIKey:  apiKey,
 			})
 		},
@@ -510,6 +513,21 @@ func (h *logHook) AfterToolCall(_ tools.HookContext, name string, params json.Ra
 
 func formatToolCall(name string, params json.RawMessage) string {
 	return fmt.Sprintf("%s(%s)", name, formatParams(params))
+}
+
+// envDuration returns the duration value of the named env var, treating empty
+// or unset as def. Malformed values log a warning and fall back to def.
+func envDuration(name string, def time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		fmt.Fprintf(os.Stderr, "warning: %s=%q is not a valid duration; using default %s\n", name, v, def)
+		return def
+	}
+	return d
 }
 
 // envBool returns the boolean value of the named env var, treating empty

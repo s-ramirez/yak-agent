@@ -179,6 +179,89 @@ func TestWebhookHandler_GroupRequiresTag(t *testing.T) {
 	}
 }
 
+func TestWebhookHandler_GroupParticipantsForwarded(t *testing.T) {
+	ch := New(Config{
+		ServerURL:     "http://localhost",
+		Password:      "secret",
+		OwnerHandles:  []string{"+15551234567"},
+		GroupTag:      "@yak",
+		DebounceDelay: 50 * time.Millisecond,
+	})
+	out := make(chan channel.Inbound, 4)
+	handler := ch.makeHandler(context.Background(), out)
+
+	body := makeGroupMessagePayload(
+		"+15551234567",
+		"@yak say hi to everyone",
+		"iMessage;+;groupchat123",
+		[]string{"+15551234567", "+15559999999", "alice@example.com"},
+	)
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	req.URL.RawQuery = "password=secret"
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	select {
+	case msg := <-out:
+		// Sender should be excluded; other two should be present.
+		wantHas := []string{"+15559999999", "alice@example.com"}
+		for _, h := range wantHas {
+			found := false
+			for _, p := range msg.Participants {
+				if p == h {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("Participants missing %q: %v", h, msg.Participants)
+			}
+		}
+		for _, p := range msg.Participants {
+			if p == "+15551234567" {
+				t.Errorf("sender should be excluded from Participants, got %v", msg.Participants)
+			}
+		}
+		if !strings.Contains(msg.Content, "[group participants:") {
+			t.Errorf("content should include participants prefix, got %q", msg.Content)
+		}
+		if !strings.Contains(msg.Content, "say hi to everyone") {
+			t.Errorf("content should retain body, got %q", msg.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for group message")
+	}
+}
+
+func TestWebhookHandler_DMHasNoParticipants(t *testing.T) {
+	ch := New(Config{
+		ServerURL:     "http://localhost",
+		Password:      "secret",
+		OwnerHandles:  []string{"+15551234567"},
+		DebounceDelay: 50 * time.Millisecond,
+	})
+	out := make(chan channel.Inbound, 4)
+	handler := ch.makeHandler(context.Background(), out)
+
+	body := makeNewMessagePayload("+15551234567", "ping", "iMessage;-;+15551234567", false)
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	req.URL.RawQuery = "password=secret"
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	select {
+	case msg := <-out:
+		if len(msg.Participants) != 0 {
+			t.Errorf("DM should have no Participants, got %v", msg.Participants)
+		}
+		if strings.Contains(msg.Content, "group participants") {
+			t.Errorf("DM content should not carry participants prefix, got %q", msg.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for DM")
+	}
+}
+
 func TestWebhookHandler_NonPostIgnored(t *testing.T) {
 	ch := New(Config{Password: "secret"})
 	out := make(chan channel.Inbound, 4)
@@ -224,6 +307,45 @@ func makeNewMessagePayload(handle, text, chatGUID string, fromMe bool) []byte {
 			IsFromMe: fromMe,
 			Chats:    []chatObj{{Guid: chatGUID, Style: style}},
 			Handle:   handleObj{Address: handle},
+		},
+	}
+	b, _ := json.Marshal(p)
+	return b
+}
+
+// makeGroupMessagePayload builds a group-chat webhook body with a participants roster.
+func makeGroupMessagePayload(handle, text, chatGUID string, participants []string) []byte {
+	type handleObj struct {
+		Address string `json:"address"`
+	}
+	type partObj struct {
+		Address string `json:"address"`
+	}
+	type chatObj struct {
+		Guid         string    `json:"guid"`
+		Style        int       `json:"style"`
+		Participants []partObj `json:"participants"`
+	}
+	type data struct {
+		Text     string    `json:"text"`
+		IsFromMe bool      `json:"isFromMe"`
+		Chats    []chatObj `json:"chats"`
+		Handle   handleObj `json:"handle"`
+	}
+	type payload struct {
+		Type string `json:"type"`
+		Data data   `json:"data"`
+	}
+	parts := make([]partObj, 0, len(participants))
+	for _, p := range participants {
+		parts = append(parts, partObj{Address: p})
+	}
+	p := payload{
+		Type: "new-message",
+		Data: data{
+			Text:   text,
+			Chats:  []chatObj{{Guid: chatGUID, Style: 43, Participants: parts}},
+			Handle: handleObj{Address: handle},
 		},
 	}
 	b, _ := json.Marshal(p)
