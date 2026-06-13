@@ -64,6 +64,10 @@ func (f *fakeChannel) sends() []Outbound {
 	return out
 }
 
+type topicRouterFunc func(Inbound) TopicRoute
+
+func (f topicRouterFunc) Route(in Inbound) TopicRoute { return f(in) }
+
 // echoHandler replies with "echo: <content>" and appends the user
 // message to the conversation.
 type echoHandler struct {
@@ -204,6 +208,51 @@ func TestDispatcherIsolatesConversationsByKey(t *testing.T) {
 	}
 	if alice == bob {
 		t.Fatal("expected distinct Conversation pointers for different threads")
+	}
+}
+
+func TestDispatcherRoutesTopicsThroughTopicRouter(t *testing.T) {
+	ch := newFakeChannel("telegram",
+		Inbound{Channel: "telegram", Thread: "-1001", Topic: "exercise", Content: "one", Kind: KindUser},
+	)
+	reg := NewRegistry()
+	reg.Register(ch)
+
+	store := NewStore()
+	handler := &echoHandler{}
+	d := &Dispatcher{
+		Channels: reg,
+		Store:    store,
+		Handler:  handler,
+		TopicRouter: topicRouterFunc(func(in Inbound) TopicRoute {
+			route := DefaultTopicRoute(in)
+			route.Key.Thread = in.Thread + "::agent=rocky"
+			return route
+		}),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		_ = d.Run(ctx)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && handler.turnCount() < 1 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	routed := store.Get(Key{Channel: "telegram", Thread: "-1001::agent=rocky", Topic: "exercise"})
+	if routed == nil {
+		t.Fatal("expected routed conversation")
+	}
+	base := store.Get(Key{Channel: "telegram", Thread: "-1001", Topic: "exercise"})
+	if base == routed {
+		t.Fatal("expected base and routed keys to differ")
 	}
 }
 

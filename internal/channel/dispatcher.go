@@ -33,6 +33,7 @@ type Dispatcher struct {
 	Handler     TurnHandler
 	OnUserInput func()
 	Logger      func(format string, args ...any)
+	TopicRouter TopicRouter
 }
 
 // Run starts listeners for every registered channel and blocks until
@@ -79,11 +80,22 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 }
 
 func (d *Dispatcher) process(ctx context.Context, in Inbound) {
+	route := DefaultTopicRoute(in)
+	if d.TopicRouter != nil {
+		route = d.TopicRouter.Route(in)
+		if route.Content == "" {
+			route.Content = in.Content
+		}
+	}
+	in.Content = route.Content
+	in.Channel = route.Key.Channel
+	in.Thread = route.Key.Thread
+	in.Topic = route.Key.Topic
 	// Handle /new and /reset before command expansion: clear the
 	// conversation. If the command carries a trailing body, fall through
 	// and treat that body as the first user message of the fresh session.
 	if matched, tail := ParseResetCommand(in.Content); matched {
-		key := Key{Channel: in.Channel, Thread: in.Thread, Topic: in.Topic}
+		key := route.Key
 		d.Store.Get(key) // ensure provisioned
 		d.Store.Reset(key)
 		if tail == "" {
@@ -107,7 +119,7 @@ func (d *Dispatcher) process(ctx context.Context, in Inbound) {
 		d.OnUserInput()
 	}
 
-	conv := d.Store.Get(Key{Channel: in.Channel, Thread: in.Thread, Topic: in.Topic})
+	conv := d.Store.Get(route.Key)
 	if in.Kind == KindUser {
 		conv.UserTurnsSinceMemoryReview++
 	}
@@ -142,8 +154,8 @@ func (d *Dispatcher) process(ctx context.Context, in Inbound) {
 		}
 	}
 
-	if err := d.Store.Save(Key{Channel: in.Channel, Thread: in.Thread, Topic: in.Topic}); err != nil {
-		d.logf("save conversation %s/%s/%s: %v", in.Channel, in.Thread, in.Topic, err)
+	if err := d.Store.Save(route.Key); err != nil {
+		d.logf("save conversation %s/%s/%s: %v", route.Key.Channel, route.Key.Thread, route.Key.Topic, err)
 	}
 }
 
