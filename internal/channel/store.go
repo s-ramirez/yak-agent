@@ -23,6 +23,7 @@ type Provisioner interface {
 type Binding struct {
 	Channel      string `json:"channel"`
 	Thread       string `json:"thread"`
+	Topic        string `json:"topic,omitempty"`
 	HistoryFile  string `json:"history_file,omitempty"`
 	MemoryDir    string `json:"memory_dir,omitempty"`
 	WorkspaceDir string `json:"workspace_dir,omitempty"`
@@ -44,6 +45,10 @@ type Conversation struct {
 	LastUsage      *types.Usage
 	LastUsageIndex int // -1 means "no authoritative prefix yet"
 
+	// UserTurnsSinceMemoryReview drives periodic memory review and is
+	// persisted so process restarts do not reset the interval.
+	UserTurnsSinceMemoryReview int
+
 	// Workspace, if non-empty, is the working directory the runner
 	// chdirs to for the duration of each turn. Empty means process cwd.
 	Workspace string
@@ -55,11 +60,12 @@ type Conversation struct {
 
 // persistedConversation is the JSON shape written to disk.
 type persistedConversation struct {
-	Key            Key             `json:"key"`
-	Messages       []types.Message `json:"messages"`
-	LastSummary    string          `json:"last_summary,omitempty"`
-	LastUsage      *types.Usage    `json:"last_usage,omitempty"`
-	LastUsageIndex int             `json:"last_usage_index"`
+	Key                        Key             `json:"key"`
+	Messages                   []types.Message `json:"messages"`
+	LastSummary                string          `json:"last_summary,omitempty"`
+	LastUsage                  *types.Usage    `json:"last_usage,omitempty"`
+	LastUsageIndex             int             `json:"last_usage_index"`
+	UserTurnsSinceMemoryReview int             `json:"user_turns_since_memory_review,omitempty"`
 }
 
 // Store manages in-memory conversations plus optional on-disk
@@ -128,11 +134,12 @@ func (s *Store) Save(key Key) error {
 		return err
 	}
 	data, err := json.MarshalIndent(persistedConversation{
-		Key:            conv.Key,
-		Messages:       conv.Messages,
-		LastSummary:    conv.LastSummary,
-		LastUsage:      conv.LastUsage,
-		LastUsageIndex: conv.LastUsageIndex,
+		Key:                        conv.Key,
+		Messages:                   conv.Messages,
+		LastSummary:                conv.LastSummary,
+		LastUsage:                  conv.LastUsage,
+		LastUsageIndex:             conv.LastUsageIndex,
+		UserTurnsSinceMemoryReview: conv.UserTurnsSinceMemoryReview,
 	}, "", "  ")
 	if err != nil {
 		return err
@@ -153,6 +160,7 @@ func (s *Store) Reset(key Key) {
 		conv.LastSummary = ""
 		conv.LastUsage = nil
 		conv.LastUsageIndex = -1
+		conv.UserTurnsSinceMemoryReview = 0
 	}
 	base := s.baseDir
 	s.mu.Unlock()
@@ -184,6 +192,7 @@ func (s *Store) loadHistory(conv *Conversation) {
 	conv.LastSummary = p.LastSummary
 	conv.LastUsage = p.LastUsage
 	conv.LastUsageIndex = p.LastUsageIndex
+	conv.UserTurnsSinceMemoryReview = p.UserTurnsSinceMemoryReview
 	if len(p.Messages) == 0 && conv.LastUsageIndex == 0 {
 		conv.LastUsageIndex = -1
 	}
@@ -205,6 +214,7 @@ func (s *Store) provision(conv *Conversation) {
 	b := Binding{
 		Channel:      conv.Key.Channel,
 		Thread:       conv.Key.Thread,
+		Topic:        conv.Key.Topic,
 		HistoryFile:  s.historyPath(conv.Key),
 		WorkspaceDir: ws,
 	}
@@ -226,6 +236,13 @@ func (s *Store) historyPath(key Key) string {
 	if thread == "" {
 		return ""
 	}
+	if key.Topic != "" {
+		topic := sanitizeSegment(key.Topic)
+		if topic == "" {
+			return ""
+		}
+		return filepath.Join(s.baseDir, "conversations", sanitizeSegment(key.Channel), thread, topic+".json")
+	}
 	return filepath.Join(s.baseDir, "conversations", sanitizeSegment(key.Channel), thread+".json")
 }
 
@@ -243,7 +260,7 @@ func (s *Store) loadBindings() {
 		return
 	}
 	for _, b := range list {
-		s.bindings[Key{Channel: b.Channel, Thread: b.Thread}] = b
+		s.bindings[Key{Channel: b.Channel, Thread: b.Thread, Topic: b.Topic}] = b
 	}
 }
 

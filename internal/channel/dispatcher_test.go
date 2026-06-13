@@ -128,6 +128,41 @@ func TestDispatcherRoutesInboundToHandlerAndReplyBack(t *testing.T) {
 	}
 }
 
+func TestDispatcherIsolatesConversationsByTopic(t *testing.T) {
+	ch := newFakeChannel("telegram",
+		Inbound{Channel: "telegram", Thread: "-1001", Topic: "exercise", Content: "one", Kind: KindUser},
+		Inbound{Channel: "telegram", Thread: "-1001", Topic: "nutrition", Content: "two", Kind: KindUser},
+	)
+	reg := NewRegistry()
+	reg.Register(ch)
+
+	store := NewStore()
+	handler := &echoHandler{}
+	d := &Dispatcher{Channels: reg, Store: store, Handler: handler}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		_ = d.Run(ctx)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && handler.turnCount() < 2 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	a := store.Get(Key{Channel: "telegram", Thread: "-1001", Topic: "exercise"})
+	b := store.Get(Key{Channel: "telegram", Thread: "-1001", Topic: "nutrition"})
+	if a == b {
+		t.Fatal("expected distinct Conversation pointers for different topics")
+	}
+}
+
 func TestDispatcherIsolatesConversationsByKey(t *testing.T) {
 	ch := newFakeChannel("cli",
 		Inbound{Channel: "cli", Thread: "alice", Content: "one", Kind: KindUser},

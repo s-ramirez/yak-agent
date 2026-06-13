@@ -21,6 +21,7 @@ const (
 type Key struct {
 	Channel string
 	Thread  string
+	Topic   string
 }
 
 // Inbound is a message entering the dispatcher. Channel + Thread form
@@ -28,6 +29,7 @@ type Key struct {
 type Inbound struct {
 	Channel    string
 	Thread     string
+	Topic      string
 	Sender     string
 	Content    string
 	Kind       Kind
@@ -55,6 +57,7 @@ type Inbound struct {
 type Outbound struct {
 	Channel string
 	Thread  string
+	Topic   string
 	Content string
 }
 

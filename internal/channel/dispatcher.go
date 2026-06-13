@@ -83,11 +83,11 @@ func (d *Dispatcher) process(ctx context.Context, in Inbound) {
 	// conversation. If the command carries a trailing body, fall through
 	// and treat that body as the first user message of the fresh session.
 	if matched, tail := ParseResetCommand(in.Content); matched {
-		key := Key{Channel: in.Channel, Thread: in.Thread}
+		key := Key{Channel: in.Channel, Thread: in.Thread, Topic: in.Topic}
 		d.Store.Get(key) // ensure provisioned
 		d.Store.Reset(key)
 		if tail == "" {
-			d.replyText(ctx, in.Channel, in.Thread, "New conversation started.\n")
+			d.replyText(ctx, in.Channel, in.Thread, in.Topic, "New conversation started.\n")
 			return
 		}
 		in.Content = tail
@@ -97,7 +97,7 @@ func (d *Dispatcher) process(ctx context.Context, in Inbound) {
 	if d.Commands != nil {
 		expanded, err := d.Commands.Expand(in.Content)
 		if err != nil {
-			d.replyText(ctx, in.Channel, in.Thread, fmt.Sprintf("error: %v\n", err))
+			d.replyText(ctx, in.Channel, in.Thread, in.Topic, fmt.Sprintf("error: %v\n", err))
 			return
 		}
 		content = expanded
@@ -107,7 +107,10 @@ func (d *Dispatcher) process(ctx context.Context, in Inbound) {
 		d.OnUserInput()
 	}
 
-	conv := d.Store.Get(Key{Channel: in.Channel, Thread: in.Thread})
+	conv := d.Store.Get(Key{Channel: in.Channel, Thread: in.Thread, Topic: in.Topic})
+	if in.Kind == KindUser {
+		conv.UserTurnsSinceMemoryReview++
+	}
 
 	// Propagate per-message model override; cleared after the turn.
 	conv.ModelOverride = in.ModelOverride
@@ -127,7 +130,7 @@ func (d *Dispatcher) process(ctx context.Context, in Inbound) {
 			return err
 		}
 	} else {
-		reply = d.replyFuncFor(ctx, in.Channel, in.Thread)
+		reply = d.replyFuncFor(ctx, in.Channel, in.Thread, in.Topic)
 	}
 
 	if err := d.Handler.HandleTurn(ctx, conv, content, reply); err != nil {
@@ -139,24 +142,24 @@ func (d *Dispatcher) process(ctx context.Context, in Inbound) {
 		}
 	}
 
-	if err := d.Store.Save(Key{Channel: in.Channel, Thread: in.Thread}); err != nil {
-		d.logf("save conversation %s/%s: %v", in.Channel, in.Thread, err)
+	if err := d.Store.Save(Key{Channel: in.Channel, Thread: in.Thread, Topic: in.Topic}); err != nil {
+		d.logf("save conversation %s/%s/%s: %v", in.Channel, in.Thread, in.Topic, err)
 	}
 }
 
-func (d *Dispatcher) replyFuncFor(ctx context.Context, chName, thread string) ReplyFunc {
+func (d *Dispatcher) replyFuncFor(ctx context.Context, chName, thread, topic string) ReplyFunc {
 	return func(text string) error {
-		return d.replyText(ctx, chName, thread, text)
+		return d.replyText(ctx, chName, thread, topic, text)
 	}
 }
 
-func (d *Dispatcher) replyText(ctx context.Context, chName, thread, text string) error {
+func (d *Dispatcher) replyText(ctx context.Context, chName, thread, topic, text string) error {
 	ch, ok := d.Channels.Lookup(chName)
 	if !ok {
 		d.logf("reply channel %q not found", chName)
 		return nil
 	}
-	return ch.Send(ctx, Outbound{Channel: chName, Thread: thread, Content: text})
+	return ch.Send(ctx, Outbound{Channel: chName, Thread: thread, Topic: topic, Content: text})
 }
 
 func (d *Dispatcher) logf(format string, args ...any) {
