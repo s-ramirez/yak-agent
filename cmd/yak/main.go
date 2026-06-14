@@ -499,6 +499,8 @@ func main() {
 		channels.Register(schedCh)
 	}
 
+	routeRegistry := channel.NewRouteRegistry()
+
 	// Register messaging channels (instances were created above).
 	if imsgChannel != nil {
 		channels.Register(imsgChannel)
@@ -515,11 +517,62 @@ func main() {
 			len(discordCfg.OwnerIDs), discordCfg.GuildTag)
 	}
 
+	subagentHandlers := make(map[string]channel.TurnHandler)
+	if subagentManager != nil {
+		for _, def := range subagentManager.ListDefinitions() {
+			rt, err := subagentManager.BuildRuntime(def.Name)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: building subagent runtime %q: %v\n", def.Name, err)
+				continue
+			}
+			subRunner := &cli.Runner{
+				Client:               chatClient,
+				Registry:             rt.Registry,
+				Skills:               nil,
+				AfterTurnHooks:       rt.Hooks.AfterTurnHooks(),
+				AgentStartHooks:      rt.Hooks.AgentStartHooks(),
+				AgentEndHooks:        rt.Hooks.AgentEndHooks(),
+				UsageHooks:           rt.Hooks.UsageHooks(),
+				PluginPrompts:        rt.Prompts,
+				AgentID:              def.Name,
+				AgentName:            def.Name,
+				Prompt:               def.Prompt,
+				ContextSize:          def.ContextSize,
+				ContextFiles:         contextFiles,
+				MemoryStore:          memoryStore,
+				MemoryReviewInterval: 10,
+				MemoryReviewer:       memoryReviewer,
+				Scheduler:            scheduler,
+				Compaction:           compaction.DefaultSettings,
+				HeartbeatEnabled:     hbCfg.Interval > 0,
+				ClientForModel: func(m string) llm.ChatClient {
+					override, overrideErr := newProviderClient(provider, baseURL, m, apiKey, llmTimeout)
+					if overrideErr != nil {
+						return chatClient
+					}
+					return override
+				},
+			}
+			if def.Model != "" {
+				if override := subRunner.ClientForModel(def.Model); override != nil {
+					subRunner.Client = override
+				}
+			}
+			subagentHandlers[def.Name] = subRunner
+		}
+	}
+
+	handler := &channel.DelegatingHandler{
+		Main:        &runner,
+		Subagents:   subagentHandlers,
+		RouteAgents: routeRegistry,
+	}
+
 	dispatcher := &channel.Dispatcher{
 		Channels: channels,
 		Store:    convStore,
 		Commands: &channel.CommandExpander{Skills: skillsRegistry},
-		Handler:  &runner,
+		Handler:  handler,
 		Logger: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "[dispatcher] "+format+"\n", args...)
 		},

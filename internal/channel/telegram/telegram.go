@@ -24,14 +24,15 @@ type Config struct {
 // Channel is a routing stub used by the dispatcher and tests. Listen/Send are
 // intentionally inert until a real Telegram transport is added.
 type Channel struct {
-	cfg Config
+	cfg    Config
+	routes *channel.RouteRegistry
 }
 
-func New(cfg Config) *Channel {
+func New(cfg Config, routes *channel.RouteRegistry) *Channel {
 	if cfg.Topics == nil {
 		cfg.Topics = map[string]TopicConfig{}
 	}
-	return &Channel{cfg: cfg}
+	return &Channel{cfg: cfg, routes: routes}
 }
 
 func (c *Channel) Name() string { return Name }
@@ -63,5 +64,8 @@ func (c *Channel) Route(in channel.Inbound) channel.TopicRoute {
 	}
 	route.Key.Thread = in.Thread + "::agent=" + agent
 	route.AgentName = agent
+	if c.routes != nil {
+		c.routes.Set(route.Key, agent)
+	}
 	return route
 }
