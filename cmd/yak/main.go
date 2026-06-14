@@ -19,6 +19,7 @@ import (
 	discordchannel "yak-go/internal/channel/discord"
 	imessagechannel "yak-go/internal/channel/imessage"
 	"yak-go/internal/channel/sched"
+	telegramchannel "yak-go/internal/channel/telegram"
 	"yak-go/internal/cli"
 	"yak-go/internal/compaction"
 	heartbeatPkg "yak-go/internal/heartbeat"
@@ -448,6 +449,7 @@ func main() {
 	if discordCfg != nil {
 		discordChannel = discordchannel.New(*discordCfg)
 	}
+	telegramCfg := telegramchannel.ConfigFromEnv(os.Getenv)
 
 	channels := channel.NewRegistry()
 	cliCh := clichannel.NewStdio(os.Stdin, os.Stdout)
@@ -515,6 +517,10 @@ func main() {
 		channels.Register(discordChannel)
 		fmt.Fprintf(os.Stderr, "Discord channel enabled (owners=%d, tag=%q)\n",
 			len(discordCfg.OwnerIDs), discordCfg.GuildTag)
+	}
+	if len(telegramCfg.Topics) > 0 {
+		channels.Register(telegramchannel.New(telegramCfg, routeRegistry))
+		fmt.Fprintf(os.Stderr, "Telegram topic routing enabled (%d topic mappings)\n", len(telegramCfg.Topics))
 	}
 
 	subagentHandlers := make(map[string]channel.TurnHandler)
