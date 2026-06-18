@@ -75,6 +75,13 @@ type Manager struct {
 	mu             sync.RWMutex
 }
 
+type Runtime struct {
+	Definition Definition
+	Registry   *tools.Registry
+	Prompts    []string
+	Hooks      runtimeHooks
+}
+
 // SetBaseObservers installs observation hooks that apply to every subagent
 // run regardless of def.Plugins — mirroring how baseHooks already applies
 // tool hooks globally. Intended for plugins like the webui that passively
@@ -239,6 +246,22 @@ type runtimeHooks struct {
 	usage      []plugin.UsageHook
 }
 
+func (h runtimeHooks) AfterTurnHooks() []plugin.AfterTurnHook {
+	return append([]plugin.AfterTurnHook(nil), h.afterTurn...)
+}
+
+func (h runtimeHooks) AgentStartHooks() []plugin.AgentStartHook {
+	return append([]plugin.AgentStartHook(nil), h.agentStart...)
+}
+
+func (h runtimeHooks) AgentEndHooks() []plugin.AgentEndHook {
+	return append([]plugin.AgentEndHook(nil), h.agentEnd...)
+}
+
+func (h runtimeHooks) UsageHooks() []plugin.UsageHook {
+	return append([]plugin.UsageHook(nil), h.usage...)
+}
+
 func (m *Manager) buildRuntime(def Definition) (*tools.Registry, []string, runtimeHooks, error) {
 	allowedPlugins := make(map[string]RuntimePlugin, len(def.Plugins))
 	for _, name := range def.Plugins {
@@ -309,6 +332,20 @@ func (m *Manager) buildRuntime(def Definition) (*tools.Registry, []string, runti
 	}
 
 	return registry, prompts, hooks, nil
+}
+
+func (m *Manager) BuildRuntime(agent string) (*Runtime, error) {
+	m.mu.RLock()
+	def, ok := m.definitions[agent]
+	m.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("unknown subagent %q", agent)
+	}
+	registry, prompts, hooks, err := m.buildRuntime(def)
+	if err != nil {
+		return nil, err
+	}
+	return &Runtime{Definition: def, Registry: registry, Prompts: prompts, Hooks: hooks}, nil
 }
 
 func (m *Manager) execute(run *childRun, req SpawnRequest, def Definition) {

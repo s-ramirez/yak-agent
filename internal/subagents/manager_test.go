@@ -28,6 +28,30 @@ func (c *loggedClient) Chat(_ context.Context, _ []types.Message, _ []types.Chat
 	}, nil
 }
 
+func TestManagerBuildRuntimeReturnsDefinitionRuntime(t *testing.T) {
+	manager, err := NewManager(
+		func(def Definition) (llm.ChatClient, error) { return &loggedClient{response: "done"}, nil },
+		"",
+		[]Definition{{Name: "scout", Model: "small-model", Tools: []string{"read"}, Prompt: "You are Scout."}},
+		[]tools.Tool{testTool{name: "read"}},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+	rt, err := manager.BuildRuntime("scout")
+	if err != nil {
+		t.Fatalf("BuildRuntime returned error: %v", err)
+	}
+	if rt.Definition.Name != "scout" {
+		t.Fatalf("unexpected runtime def: %+v", rt.Definition)
+	}
+	if rt.Registry == nil {
+		t.Fatal("expected registry")
+	}
+}
+
 func TestManagerLogsSubagentTranscripts(t *testing.T) {
 	logDir := t.TempDir()
 	manager, err := NewManager(

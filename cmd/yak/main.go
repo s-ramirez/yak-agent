@@ -19,6 +19,7 @@ import (
 	discordchannel "yak-go/internal/channel/discord"
 	imessagechannel "yak-go/internal/channel/imessage"
 	"yak-go/internal/channel/sched"
+	telegramchannel "yak-go/internal/channel/telegram"
 	"yak-go/internal/cli"
 	"yak-go/internal/compaction"
 	heartbeatPkg "yak-go/internal/heartbeat"
@@ -45,6 +46,13 @@ func main() {
 	if err := loadDotenv(".env"); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: loading .env: %v\n", err)
 	}
+	if len(os.Args) > 1 && os.Args[1] == "auth" {
+		if err := runAuth(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "auth failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	baseURL := os.Getenv("YAK_BASE_URL")
 	if baseURL == "" {
@@ -57,6 +65,7 @@ func main() {
 	}
 
 	apiKey := os.Getenv("YAK_API_KEY")
+	provider := os.Getenv("YAK_PROVIDER")
 
 	cwd, _ := os.Getwd()
 	home, _ := os.UserHomeDir()
@@ -70,6 +79,9 @@ func main() {
 		os.Exit(1)
 	}
 	if agentCfg != nil {
+		if agentCfg.Provider != "" {
+			provider = agentCfg.Provider
+		}
 		baseURL = agentCfg.BaseURL
 		if baseURL == "" {
 			baseURL = os.Getenv("YAK_BASE_URL")
@@ -86,11 +98,13 @@ func main() {
 
 	llmTimeout := envDuration("YAK_LLM_TIMEOUT", 300*time.Second)
 	subagentLLMTimeout := envDuration("YAK_SUBAGENT_LLM_TIMEOUT", llmTimeout)
+	disableTools := envBool("YAK_DISABLE_TOOLS", false)
 
-	client := llm.NewClient(baseURL, model, &llm.Options{
-		Timeout: llmTimeout,
-		APIKey:  apiKey,
-	})
+	client, err := newProviderClient(provider, baseURL, model, apiKey, llmTimeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: configuring LLM provider: %v\n", err)
+		os.Exit(1)
+	}
 
 	var chatClient llm.ChatClient = client
 	var sessionDir string
@@ -137,6 +151,7 @@ func main() {
 	for _, d := range subagentDiags {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", d)
 	}
+	memoryReviewerDef, defs := subagents.SplitMemoryReviewerDefinition(defs)
 	searchDelegationGuidelines := subagents.SearchDelegationGuidelines(defs)
 
 	memoryStore := memory.NewStore(filepath.Join(cwd, ".yak", "memory"))
@@ -279,6 +294,11 @@ func main() {
 			pluginPrompts = append(pluginPrompts, s)
 		}
 	}
+	if disableTools {
+		fmt.Fprintln(os.Stderr, "warning: YAK_DISABLE_TOOLS enabled; function/tool calling is disabled for provider compatibility")
+		builtinTools = nil
+		allTools = nil
+	}
 
 	skillDirs := []string{
 		filepath.Join(home, ".yak", "skills"),
@@ -307,23 +327,45 @@ func main() {
 	skillWriteLogPath := filepath.Join(cwd, ".yak", "logs", "skill_writes.log")
 	// skill_write is orchestrator-only — appended to allTools, not builtinTools,
 	// so subagents don't inherit it.
-	allTools = append(allTools, tools.NewSkillWriteTool(projectSkillsDir, skillWriteLogPath, reloadSkills))
+	if !disableTools {
+		allTools = append(allTools, tools.NewSkillWriteTool(projectSkillsDir, skillWriteLogPath, reloadSkills))
+	}
+
+	subagentClientFactory := func(def subagents.Definition) (llm.ChatClient, error) {
+		subagentProvider := def.Provider
+		if subagentProvider == "" {
+			if def.BaseURL == "" && def.APIKeyEnv == "" {
+				subagentProvider = provider
+			} else {
+				subagentProvider = providerOpenAICompatible
+			}
+		}
+		u := def.BaseURL
+		if u == "" {
+			u = baseURL
+		}
+		key := apiKey
+		if def.APIKeyEnv != "" {
+			key = os.Getenv(def.APIKeyEnv)
+		}
+		return newProviderClient(subagentProvider, u, def.Model, key, subagentLLMTimeout)
+	}
+
+	memoryReviewer, err := subagents.NewMemoryReviewer(
+		memoryReviewerDef,
+		subagentClientFactory,
+		subagentLLMTimeout,
+		baseHooks,
+		func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "[memory-reviewer] "+format+"\n", args...)
+		},
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: memory reviewer disabled: %v\n", err)
+	}
 
 	subagentManager, err := subagents.NewManager(
-		func(def subagents.Definition) (llm.ChatClient, error) {
-			u := def.BaseURL
-			if u == "" {
-				u = baseURL
-			}
-			key := apiKey
-			if def.APIKeyEnv != "" {
-				key = os.Getenv(def.APIKeyEnv)
-			}
-			return llm.NewClient(u, def.Model, &llm.Options{
-				Timeout: subagentLLMTimeout,
-				APIKey:  key,
-			}), nil
-		},
+		subagentClientFactory,
 		sessionDir,
 		defs,
 		builtinTools,
@@ -332,7 +374,7 @@ func main() {
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: subagents disabled: %v\n", err)
-	} else {
+	} else if !disableTools {
 		subagentManager.SetBaseObservers(agentStartHooks, agentEndHooks, usageHooks)
 		allTools = append(allTools,
 			subagents.NewSpawnTool(subagentManager),
@@ -359,30 +401,32 @@ func main() {
 	// Load IDENTITY.md and USER.md from agentDirs; last found wins (project overrides home).
 	contextFiles := loadContextFiles(agentDirs, "IDENTITY.md", "USER.md")
 
-	var userActivity bool
 	runner := cli.Runner{
-		Client:           chatClient,
-		Registry:         registry,
-		Skills:           skillsRegistry,
-		AfterTurnHooks:   afterTurnHooks,
-		AgentStartHooks:  agentStartHooks,
-		AgentEndHooks:    agentEndHooks,
-		UsageHooks:       usageHooks,
-		PluginPrompts:    pluginPrompts,
-		AgentID:          "main",
-		AgentName:        "orchestrator",
-		Prompt:           agentPrompt,
-		ContextSize:      contextSize,
-		ContextFiles:     contextFiles,
-		MemoryStore:      memoryStore,
-		Scheduler:        scheduler,
-		Compaction:       compaction.DefaultSettings,
-		HeartbeatEnabled: hbCfg.Interval > 0,
+		Client:               chatClient,
+		Registry:             registry,
+		Skills:               skillsRegistry,
+		AfterTurnHooks:       afterTurnHooks,
+		AgentStartHooks:      agentStartHooks,
+		AgentEndHooks:        agentEndHooks,
+		UsageHooks:           usageHooks,
+		PluginPrompts:        pluginPrompts,
+		AgentID:              "main",
+		AgentName:            "orchestrator",
+		Prompt:               agentPrompt,
+		ContextSize:          contextSize,
+		ContextFiles:         contextFiles,
+		MemoryStore:          memoryStore,
+		MemoryReviewInterval: 10,
+		MemoryReviewer:       memoryReviewer,
+		Scheduler:            scheduler,
+		Compaction:           compaction.DefaultSettings,
+		HeartbeatEnabled:     hbCfg.Interval > 0,
 		ClientForModel: func(m string) llm.ChatClient {
-			return llm.NewClient(baseURL, m, &llm.Options{
-				Timeout: llmTimeout,
-				APIKey:  apiKey,
-			})
+			override, overrideErr := newProviderClient(provider, baseURL, m, apiKey, llmTimeout)
+			if overrideErr != nil {
+				return chatClient
+			}
+			return override
 		},
 	}
 
@@ -405,6 +449,7 @@ func main() {
 	if discordCfg != nil {
 		discordChannel = discordchannel.New(*discordCfg)
 	}
+	telegramCfg := telegramchannel.ConfigFromEnv(os.Getenv)
 
 	channels := channel.NewRegistry()
 	cliCh := clichannel.NewStdio(os.Stdin, os.Stdout)
@@ -456,6 +501,8 @@ func main() {
 		channels.Register(schedCh)
 	}
 
+	routeRegistry := channel.NewRouteRegistry()
+
 	// Register messaging channels (instances were created above).
 	if imsgChannel != nil {
 		channels.Register(imsgChannel)
@@ -471,24 +518,73 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Discord channel enabled (owners=%d, tag=%q)\n",
 			len(discordCfg.OwnerIDs), discordCfg.GuildTag)
 	}
+	if len(telegramCfg.Topics) > 0 {
+		channels.Register(telegramchannel.New(telegramCfg, routeRegistry))
+		fmt.Fprintf(os.Stderr, "Telegram topic routing enabled (%d topic mappings)\n", len(telegramCfg.Topics))
+	}
+
+	subagentHandlers := make(map[string]channel.TurnHandler)
+	if subagentManager != nil {
+		for _, def := range subagentManager.ListDefinitions() {
+			rt, err := subagentManager.BuildRuntime(def.Name)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: building subagent runtime %q: %v\n", def.Name, err)
+				continue
+			}
+			subRunner := &cli.Runner{
+				Client:               chatClient,
+				Registry:             rt.Registry,
+				Skills:               nil,
+				AfterTurnHooks:       rt.Hooks.AfterTurnHooks(),
+				AgentStartHooks:      rt.Hooks.AgentStartHooks(),
+				AgentEndHooks:        rt.Hooks.AgentEndHooks(),
+				UsageHooks:           rt.Hooks.UsageHooks(),
+				PluginPrompts:        rt.Prompts,
+				AgentID:              def.Name,
+				AgentName:            def.Name,
+				Prompt:               def.Prompt,
+				ContextSize:          def.ContextSize,
+				ContextFiles:         contextFiles,
+				MemoryStore:          memoryStore,
+				MemoryReviewInterval: 10,
+				MemoryReviewer:       memoryReviewer,
+				Scheduler:            scheduler,
+				Compaction:           compaction.DefaultSettings,
+				HeartbeatEnabled:     hbCfg.Interval > 0,
+				ClientForModel: func(m string) llm.ChatClient {
+					override, overrideErr := newProviderClient(provider, baseURL, m, apiKey, llmTimeout)
+					if overrideErr != nil {
+						return chatClient
+					}
+					return override
+				},
+			}
+			if def.Model != "" {
+				if override := subRunner.ClientForModel(def.Model); override != nil {
+					subRunner.Client = override
+				}
+			}
+			subagentHandlers[def.Name] = subRunner
+		}
+	}
+
+	handler := &channel.DelegatingHandler{
+		Main:        &runner,
+		Subagents:   subagentHandlers,
+		RouteAgents: routeRegistry,
+	}
 
 	dispatcher := &channel.Dispatcher{
-		Channels:    channels,
-		Store:       convStore,
-		Commands:    &channel.CommandExpander{Skills: skillsRegistry},
-		Handler:     &runner,
-		OnUserInput: func() { userActivity = true },
+		Channels: channels,
+		Store:    convStore,
+		Commands: &channel.CommandExpander{Skills: skillsRegistry},
+		Handler:  handler,
 		Logger: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "[dispatcher] "+format+"\n", args...)
 		},
 	}
 
 	runErr := dispatcher.Run(runCtx)
-	if userActivity {
-		if err := runner.DistillMemory(context.Background()); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: memory distill failed: %v\n", err)
-		}
-	}
 	if runErr != nil && !errors.Is(runErr, io.EOF) && !errors.Is(runErr, context.Canceled) {
 		_, _ = fmt.Fprintf(os.Stderr, "error: %v\n", runErr)
 		os.Exit(1)
@@ -651,10 +747,14 @@ func (p *threadProvisioner) Provision(k channel.Key) (string, *memory.Store, err
 		return "", nil, nil
 	}
 	ws := filepath.Join(p.workspacesRoot, ch, thread)
+	memDir := filepath.Join(p.memoryRoot, ch, thread)
+	if topic := sanitizePathSegment(k.Topic); topic != "" {
+		ws = filepath.Join(ws, topic)
+		memDir = filepath.Join(memDir, topic)
+	}
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		return "", nil, err
 	}
-	memDir := filepath.Join(p.memoryRoot, ch, thread)
 	return ws, memory.NewStore(memDir), nil
 }
 
